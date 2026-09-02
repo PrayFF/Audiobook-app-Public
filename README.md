@@ -1,6 +1,6 @@
 # 听书（BookListen）
 
-当前版本：`1.0.0-alpha14`。
+当前版本：`1.0.0-alpha15`。
 
 一款无广告、无账号、无分析追踪的私人 Android 听书应用。书籍、网页正文、朗读缓存和播放进度全部保存在手机本地。
 
@@ -14,6 +14,7 @@
 - 原文显示、当前语音块高亮、书架与精确恢复进度。
 - Room 本地数据库、DataStore 设置、WorkManager 自动清理 14 天前或超出 512 MB 的语音缓存。
 - 网页导入会优先提取小说元数据、结构化数据和面包屑中的书名，并过滤章节名、站点名和常见分类名。
+- 网页章节会在头尾清除站点推广、分页/章节导航、连续分隔符与“阅读模式/转码阅读”提示；后续自动加载章节也使用同一规则。
 - 书架支持手动重命名；章节进度条按整章内容计算。
 
 ## 项目结构
@@ -24,13 +25,13 @@ app/
   src/test/        本地单元测试
   schemas/         Room 数据库 Schema
 gradle/wrapper/    Gradle Wrapper
-booklisten-alpha14.apk  当前推荐安装包
+booklisten-alpha15.apk  当前推荐安装包
 booklisten-alpha11.apk  整章进度条基线版本安装包
 ```
 
 ## 安装包
 
-- `booklisten-alpha14.apk`：当前版本，建议覆盖安装以保留书架和播放进度。
+- `booklisten-alpha15.apk`：当前版本，建议覆盖安装以保留书架和播放进度。
 - `booklisten-alpha11.apk`：历史基线版本，仅用于回退对照。
 
 ## 安全与边界

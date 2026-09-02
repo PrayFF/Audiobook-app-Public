@@ -41,4 +41,34 @@ class NovelTextCleanerTest {
         val input = "第一章 夜雨\n他想，下一页也许会写到联系我们的旧事。但故事仍在继续。"
         assertTrue(NovelTextCleaner.clean(input).contains("故事仍在继续"))
     }
+
+    @Test fun removesPromotionalHeaderSeparatorAndChapterNavigation() {
+        val result = NovelTextCleaner.clean(
+            """
+            本站全部小说网盘合集:深入探索书籍图书与文学宗教与信仰科幻与奇幻惊悚片、犯罪片与悬疑片上一篇一《鬼吹灯》下一篇。
+            ==================
+            第一章 白纸人
+            夜色压在屋檐上，院里没有一点声音。
+            上一章:返回列表
+            下一章:第一章白纸人和鼠友:
+            """.trimIndent(),
+        )
+        assertTrue(result.startsWith("第一章 白纸人"))
+        assertTrue(result.contains("夜色压在屋檐上"))
+        assertFalse(result.contains("网盘合集"))
+        assertFalse(result.contains("上一章:返回列表"))
+        assertFalse(result.contains("下一章:第一章"))
+    }
+
+    @Test fun removesObfuscatedReadingModeWarningAndDirectoryFooter() {
+        val result = NovelTextCleaner.clean(
+            """
+            第二章 进山
+            山路在雨后泛着微光。
+            如果被/浏/览/器/强/制进入它们的阅/读/模/式了,阅读体/验极/差请退出转/码阅读
+            返回列表返回目录
+            """.trimIndent(),
+        )
+        assertEquals("第二章 进山\n\n山路在雨后泛着微光。", result)
+    }
 }

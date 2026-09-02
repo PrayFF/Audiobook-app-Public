@@ -14,12 +14,23 @@ object NovelTextCleaner {
         "广告服务", "帮助中心", "申请链接", "加入收藏", "返回顶部", "网站地图",
         "免责声明", "ICP备案", "推荐阅读", "热门推荐", "Copyright", "版权所有",
     )
+    // These are site-navigation / promotion terms, rather than terms that normally occur in
+    // a chapter.  They are only used together with edge position or navigation structure so a
+    // sentence in the middle of a novel is not removed merely for mentioning one of them.
+    private val chromeWords = edgeWords + footerWords + listOf(
+        "返回列表", "返回目录", "章节列表", "上一篇", "下一篇", "本站", "网盘合集",
+        "图书与文学", "宗教与信仰", "科幻与奇幻", "惊悚片", "犯罪片", "悬疑片",
+        "阅读模式", "转码阅读", "退出转码", "浏览器强制进入",
+    )
     private val chapterMarker = Regex(
         "(?:正文\\s*)?(?:第[零〇○一二三四五六七八九十百千万两0-9０-９._—-]{1,16}[章回节卷部篇]|序章|楔子|引子|前言)",
     )
 
     fun clean(raw: String, title: String = ""): String {
+        // A row of '=' is typically inserted between the site header and the chapter body.
+        // Turning it into a line boundary lets the normal edge cleaner remove both sides.
         val lines = raw.replace("\r\n", "\n").replace('\r', '\n')
+            .replace(Regex("[=＝]{3,}"), "\n")
             .lines().map { it.trim() }.filter { it.isNotBlank() }
         if (lines.isEmpty()) return ""
 
@@ -65,13 +76,13 @@ object NovelTextCleaner {
         // sentence punctuation. Only inspect the last 40%/2000 chars so narrative stays untouched.
         val tailStart = maxOf(minOf(result.length * 3 / 5, result.length - 2_000), 0)
         val tail = result.substring(tailStart)
-        val navigationStarts = Regex("上一页|下一页|上一章|下一章|返回目录|目录")
+        val navigationStarts = Regex("上一页|下一页|上一章|下一章|返回列表|返回目录|目录")
             .findAll(tail)
             .map { it.range.first }
         val footerOffset = navigationStarts.firstOrNull { offset ->
             val candidate = tail.substring(offset, minOf(tail.length, offset + 500))
             val beforeSentenceEnd = candidate.substringBeforeAny("。", "！", "？")
-            footerWords.count { beforeSentenceEnd.contains(it) } >= 3
+            isFooterStart(beforeSentenceEnd) || isNavigationCluster(beforeSentenceEnd)
         }
         if (footerOffset != null) result = result.substring(0, tailStart + footerOffset).trim()
 
@@ -84,20 +95,38 @@ object NovelTextCleaner {
     }
 
     private fun isFooterStart(line: String): Boolean {
-        val compact = line.replace(" ", "")
+        val compact = compactForMatch(line)
         val matches = footerWords.count { compact.contains(it) }
-        val hasSeparators = compact.any { it in "|丨/>»›·" }
+        val hasSeparators = compact.any { it in "|丨/>»›·:" }
         return matches >= 3 || (matches >= 2 && hasSeparators) ||
-            compact.matches(Regex("^(上一页|下一页|上一章|下一章|目录|返回顶部)([|丨/\\s>»›·-].*)?$"))
+            isNavigationCluster(compact) || isReaderModeWarning(compact) ||
+            compact.matches(Regex("^(上一页|下一页|上一章|下一章|返回列表|返回目录|目录|返回顶部)([|丨/:：\\s>»›·-].*)?$"))
     }
 
     private fun isEdgeLine(line: String, words: List<String>, title: String): Boolean {
-        val compact = line.replace(" ", "")
+        val compact = compactForMatch(line)
         if (compact.length > 180 || chapterTitle.matches(line) || chapterMarker.containsMatchIn(line)) return false
         if (title.isNotBlank() && compact == title.replace(" ", "")) return false
         val matches = words.count { compact.contains(it) }
-        val hasSeparators = compact.any { it in "|丨/>»›·" }
+        val chromeMatches = chromeWords.count { compact.contains(it) }
+        val hasSeparators = compact.any { it in "|丨/>»›·:" }
         return matches >= 3 || (matches >= 2 && hasSeparators) ||
-            compact.matches(Regex("^(首页|目录|上一页|下一页|上一章|下一章|加入收藏|返回顶部)$"))
+            chromeMatches >= 3 || isNavigationCluster(compact) || isReaderModeWarning(compact) ||
+            compact.matches(Regex("^(首页|目录|上一页|下一页|上一章|下一章|返回列表|返回目录|加入收藏|返回顶部)$"))
     }
+
+    private fun compactForMatch(value: String): String =
+        value.replace(Regex("[\\s/\\\\|丨>»›·:：=＝_-]"), "")
+
+    private fun isNavigationCluster(compact: String): Boolean {
+        val navigationTerms = listOf("上一页", "下一页", "上一章", "下一章", "返回列表", "返回目录", "目录")
+        val matches = navigationTerms.count { compact.contains(it) }
+        return matches >= 2 ||
+            (compact.length <= 100 && matches >= 1 &&
+                (compact.contains("第一章") || compact.contains("第1章") || compact.contains("章节")))
+    }
+
+    private fun isReaderModeWarning(compact: String): Boolean =
+        (compact.contains("浏览器强制进入") && compact.contains("阅读模式")) ||
+            compact.contains("退出转码阅读")
 }
