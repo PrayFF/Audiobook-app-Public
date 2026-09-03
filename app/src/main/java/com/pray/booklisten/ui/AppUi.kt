@@ -152,6 +152,7 @@ private fun LibraryScreen(
     val books by viewModel.books.collectAsState()
     var renameTarget by remember { mutableStateOf<BookEntity?>(null) }
     var renameText by rememberSaveable { mutableStateOf("") }
+    var deleteTarget by remember { mutableStateOf<BookEntity?>(null) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importFile)
     }
@@ -183,7 +184,7 @@ private fun LibraryScreen(
                             renameTarget = book
                             renameText = book.title
                         },
-                        onDelete = { viewModel.delete(book) },
+                        onDelete = { deleteTarget = book },
                     )
                 }
             }
@@ -223,6 +224,23 @@ private fun LibraryScreen(
                 ) { Text("保存") }
             },
             dismissButton = { TextButton(onClick = { renameTarget = null }) { Text("取消") } },
+        )
+    }
+
+    deleteTarget?.let { book ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("删除小说") },
+            text = { Text("确定要删除《${book.title}》吗？删除后将无法恢复，播放进度也会一并清除。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.delete(book)
+                        deleteTarget = null
+                    },
+                ) { Text("确认删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("取消") } },
         )
     }
 }
@@ -442,6 +460,10 @@ private fun PlayerScreen(viewModel: MainViewModel) {
     var speedMenu by remember { mutableStateOf(false) }
     var timerMenu by remember { mutableStateOf(false) }
     var voiceDialog by remember { mutableStateOf(false) }
+    var customSpeedDialog by remember { mutableStateOf(false) }
+    var customSpeedText by remember { mutableStateOf("") }
+    var customTimerDialog by remember { mutableStateOf(false) }
+    var customTimerText by remember { mutableStateOf("") }
     var draggingChapterProgress by remember { mutableStateOf(false) }
     var draggedChapterProgress by remember { mutableStateOf(0f) }
     val playingThisChapter = playback.bookId == book?.id && playback.chapterIndex == chapter?.chapterIndex
@@ -551,6 +573,14 @@ private fun PlayerScreen(viewModel: MainViewModel) {
                                 viewModel.setSpeed(speed)
                             })
                         }
+                        DropdownMenuItem(
+                            text = { Text("自定义倍速") },
+                            onClick = {
+                                speedMenu = false
+                                customSpeedText = ""
+                                customSpeedDialog = true
+                            },
+                        )
                     }
                 }
                 TextButton(onClick = {
@@ -560,12 +590,17 @@ private fun PlayerScreen(viewModel: MainViewModel) {
                 Box {
                     TextButton(onClick = { timerMenu = true }) { Text("定时") }
                     DropdownMenu(expanded = timerMenu, onDismissRequest = { timerMenu = false }) {
-                        listOf(10, 20, 30, 60).forEach { minutes ->
+                        listOf(10, 15, 20, 30, 60).forEach { minutes ->
                             DropdownMenuItem(text = { Text("$minutes 分钟") }, onClick = {
                                 timerMenu = false
                                 viewModel.setSleepTimer(minutes)
                             })
                         }
+                        DropdownMenuItem(text = { Text("自定义分钟") }, onClick = {
+                            timerMenu = false
+                            customTimerText = ""
+                            customTimerDialog = true
+                        })
                         DropdownMenuItem(text = { Text("播完本章") }, onClick = {
                             timerMenu = false
                             viewModel.setSleepTimer(-1)
@@ -678,6 +713,74 @@ private fun PlayerScreen(viewModel: MainViewModel) {
         },
         confirmButton = { TextButton(onClick = { voiceDialog = false }) { Text("关闭") } },
     )
+
+    if (customSpeedDialog) {
+        val parsed = customSpeedText.trim().toFloatOrNull()
+        val valid = parsed != null && parsed >= 0.5f && parsed <= 4f
+        AlertDialog(
+            onDismissRequest = { customSpeedDialog = false },
+            title = { Text("自定义倍速") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = customSpeedText,
+                        onValueChange = { customSpeedText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("倍速") },
+                        placeholder = { Text("例如 1.75") },
+                        supportingText = {
+                            Text(if (valid) "将使用 ${parsed}× 播放" else "请输入 0.5 ~ 4 之间的数字")
+                        },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = valid,
+                    onClick = {
+                        viewModel.setSpeed(parsed!!)
+                        customSpeedDialog = false
+                    },
+                ) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { customSpeedDialog = false }) { Text("取消") } },
+        )
+    }
+
+    if (customTimerDialog) {
+        val parsed = customTimerText.trim().toIntOrNull()
+        val valid = parsed != null && parsed in 1..600
+        AlertDialog(
+            onDismissRequest = { customTimerDialog = false },
+            title = { Text("自定义定时") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = customTimerText,
+                        onValueChange = { customTimerText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("分钟") },
+                        placeholder = { Text("例如 45") },
+                        supportingText = {
+                            Text(if (valid) "将在 $parsed 分钟后停止播放" else "请输入 1 ~ 600 之间的整数")
+                        },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = valid,
+                    onClick = {
+                        viewModel.setSleepTimer(parsed!!)
+                        customTimerDialog = false
+                    },
+                ) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { customTimerDialog = false }) { Text("取消") } },
+        )
+    }
 }
 
 private const val EXTRACT_SCRIPT = """

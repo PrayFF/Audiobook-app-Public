@@ -54,7 +54,7 @@ class PlaybackConnection(context: Context, private val scope: CoroutineScope) {
     }
 
     fun toggle() = controller?.let { if (it.isPlaying) it.pause() else it.play() }
-    fun setSpeed(speed: Float) { controller?.setPlaybackSpeed(speed.coerceIn(0.75f, 2.5f)); refresh() }
+    fun setSpeed(speed: Float) { controller?.setPlaybackSpeed(speed.coerceIn(0.5f, 4f)); refresh() }
 
     fun seekToBlock(blockIndex: Int, fractionInBlock: Float): Boolean {
         val player = controller ?: return false

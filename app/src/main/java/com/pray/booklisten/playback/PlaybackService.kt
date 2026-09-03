@@ -132,7 +132,7 @@ class PlaybackService : MediaSessionService() {
             val chunks = TextChunker.chunk(chapter.content)
             player.stop()
             player.clearMediaItems()
-            player.setPlaybackSpeed(speed.coerceIn(0.75f, 2.5f))
+            player.setPlaybackSpeed(speed.coerceIn(0.5f, 4f))
             val safeStartBlock = startBlock.coerceIn(0, (chunks.size - 1).coerceAtLeast(0))
             chunks.drop(safeStartBlock).forEachIndexed { queueIndex, text ->
                 val index = safeStartBlock + queueIndex
