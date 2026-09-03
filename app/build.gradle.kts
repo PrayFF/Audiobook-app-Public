@@ -1,8 +1,15 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
     id("androidx.room")
+}
+
+val localSigning = Properties().apply {
+    val config = rootProject.file("keystore.properties")
+    if (config.isFile) config.inputStream().use(::load)
 }
 
 room {
@@ -17,8 +24,8 @@ android {
         applicationId = "com.pray.booklisten"
         minSdk = 26
         targetSdk = 37
-        versionCode = 15
-        versionName = "1.0.0-alpha15"
+        versionCode = 16
+        versionName = "1.0.0-alpha16"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
@@ -28,6 +35,17 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+
+    // keystore.properties is deliberately git-ignored.  It lets a personal build keep the
+    // same signing key across tool-directory moves, so Android can install it as an update.
+    signingConfigs.getByName("debug").apply {
+        localSigning.getProperty("debugStoreFile")?.takeIf { it.isNotBlank() }?.let { path ->
+            storeFile = file(path)
+            storePassword = localSigning.getProperty("debugStorePassword", "android")
+            keyAlias = localSigning.getProperty("debugKeyAlias", "androiddebugkey")
+            keyPassword = localSigning.getProperty("debugKeyPassword", "android")
         }
     }
 

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Downloaded offline voice-pack APKs kept in the app's external Download dir. -->
+    <external-files-path
+        name="voice_packs"
+        path="Download/" />
+</paths>

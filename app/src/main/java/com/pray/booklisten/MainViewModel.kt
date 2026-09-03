@@ -22,6 +22,7 @@ import com.pray.booklisten.playback.PlaybackEvents
 import com.pray.booklisten.playback.PlaybackService
 import com.pray.booklisten.settings.AppSettings
 import com.pray.booklisten.settings.ReaderSettings
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -31,7 +32,10 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.Locale
+import java.util.zip.ZipFile
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -55,10 +59,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val busy = _busy.asStateFlow()
     private val _playbackPreparing = MutableStateFlow(false)
     val playbackPreparing = _playbackPreparing.asStateFlow()
-    private val _voices = MutableStateFlow<List<String>>(emptyList())
-    val voices = _voices.asStateFlow()
     private val _engines = MutableStateFlow<List<TtsEngineOption>>(emptyList())
     val engines = _engines.asStateFlow()
+    private val _voicePackStates = MutableStateFlow<List<VoicePackUiState>>(emptyList())
+    val voicePackStates = _voicePackStates.asStateFlow()
+    private val _voicePackDownload = MutableStateFlow<VoicePackDownload?>(null)
+    val voicePackDownload = _voicePackDownload.asStateFlow()
     private var voiceProbe: TextToSpeech? = null
     private var nextPageLoading = false
     private var voiceDownloadId: Long? = null
@@ -76,6 +82,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         refreshVoiceEngines()
+        refreshVoicePackStates()
         viewModelScope.launch {
             PlaybackEvents.messages.collect {
                 _playbackPreparing.value = false
@@ -100,10 +107,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val probe = voiceProbe ?: return
         probe.language = Locale.SIMPLIFIED_CHINESE
         _engines.value = probe.engines.orEmpty().map { TtsEngineOption(it.label, it.name) }
-        _voices.value = probe.voices.orEmpty()
-            .filter { it.locale.language in setOf("zh", "en") }
-            .sortedWith(compareBy({ it.locale.language != "zh" }, { it.name }))
-            .map { it.name }
         val sherpaEngine = _engines.value.firstOrNull { isSherpaEngine(it) }
         if (!autoSelectedNeuralEngine && settings.value.ttsEngine.isBlank() && sherpaEngine != null) {
             autoSelectedNeuralEngine = true
@@ -113,6 +116,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         ) {
             _message.value = "之前选择的语音引擎未安装，请重新选择"
         }
+        refreshVoicePackStates()
     }
 
     fun clearMessage() { _message.value = null }
@@ -168,6 +172,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             putExtra(PlaybackService.EXTRA_POSITION_MS, position)
             putExtra(PlaybackService.EXTRA_VOICE_NAME, settings.value.voiceName)
             putExtra(PlaybackService.EXTRA_TTS_ENGINE, settings.value.ttsEngine)
+            putExtra(PlaybackService.EXTRA_TTS_CACHE_EPOCH, settings.value.ttsCacheEpoch)
             putExtra(PlaybackService.EXTRA_SPEED, settings.value.speed)
         }
         ContextCompat.startForegroundService(context, intent)
@@ -226,13 +231,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { appSettings.setSpeed(speed) }
     }
 
-    fun setVoice(voice: String) {
-        viewModelScope.launch {
-            appSettings.setVoice(voice)
-            _message.value = "音色将在重新播放本章后生效"
-        }
-    }
-
     fun setEngine(packageName: String) {
         viewModelScope.launch {
             appSettings.setEngine(packageName)
@@ -245,41 +243,137 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun rescanVoiceEngines() {
         refreshVoiceEngines()
+        refreshVoicePackStates()
         viewModelScope.launch {
             delay(600)
             _message.value = if (_engines.value.any(::isSherpaEngine)) {
-                "已识别到免费神经音色，正在自动选择"
+                "已识别到离线语音引擎，可在语音引擎列表中选择"
             } else {
-                "仍未发现神经音色，请确认 TTS Engine 已完成安装"
+                "仍未发现离线语音引擎，请确认语音包已完成安装"
             }
         }
     }
 
-    fun downloadNeuralVoice() {
-        downloadVoicePack("sherpa-onnx-vits-zh-ll", "中文多音色（5 种）", 137)
+    // ---------------------------------------------------------------------
+    // 离线语音包：所有语音包共用同一个引擎包名，安装新的会覆盖旧的；
+    // 已下载的 APK 安装文件保留在本应用目录，可随时重装或手动删除，切换时不会自动删除。
+    // ---------------------------------------------------------------------
+
+    fun selectVoicePack(option: VoicePackOption) {
+        val file = voicePackFile(option)
+        if (file != null && file.isFile) installVoicePack(option) else downloadVoicePack(option)
     }
 
-    fun downloadMaleVoice() {
-        downloadVoicePack("vits-zh-hf-fanchen-wnj", "中文男声", 133)
+    fun installVoicePack(option: VoicePackOption) {
+        val context = getApplication<Application>()
+        val file = voicePackFile(option)
+        if (file == null || !file.isFile) {
+            _message.value = "当前手机处理器暂不支持此离线语音包"
+            return
+        }
+        viewModelScope.launch {
+            appSettings.setInstalledVoicePack(option.model)
+            refreshVoicePackStates()
+        }
+        val uri = runCatching {
+            androidx.core.content.FileProvider.getUriForFile(
+                context, "com.pray.booklisten.fileprovider", file,
+            )
+        }.getOrNull() ?: Uri.fromFile(file)
+        val opened = runCatching {
+            context.startActivity(Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            })
+        }.isSuccess
+        _message.value = if (opened) {
+            "请在系统页面确认安装${option.label}；完成后返回本应用"
+        } else {
+            "无法打开安装页面，请在设置中允许本应用安装未知应用后重试"
+        }
     }
 
-    private fun downloadVoicePack(model: String, label: String, sizeMb: Int) {
+    fun deleteVoicePack(option: VoicePackOption) {
+        val file = voicePackFile(option)
+        if (file == null || !file.isFile) {
+            refreshVoicePackStates()
+            return
+        }
+        if (file.delete()) {
+            _message.value = "已删除语音包安装文件：${option.label}"
+        } else {
+            _message.value = "删除失败，请稍后重试"
+        }
+        refreshVoicePackStates()
+    }
+
+    private fun voicePackFile(option: VoicePackOption): File? {
+        val abi = Build.SUPPORTED_ABIS.firstOrNull { it in SHERPA_APK_URLS } ?: return null
+        return getApplication<Application>().getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?.resolve("sherpa-onnx-${option.model}-$abi.apk")
+    }
+
+    fun refreshVoicePackStates() {
+        viewModelScope.launch {
+            val states = withContext(Dispatchers.IO) {
+                val installedModel = detectInstalledVoicePackModel()
+                val hintModel = settings.value.installedVoicePack
+                val download = _voicePackDownload.value
+                VOICE_PACK_OPTIONS.map { option ->
+                    val downloading = download?.model == option.model
+                    VoicePackUiState(
+                        option = option,
+                        downloaded = voicePackFile(option)?.isFile == true,
+                        installed = installedModel == option.model,
+                        lastInstalled = hintModel == option.model && installedModel != option.model,
+                        downloading = downloading,
+                        progressPercent = if (downloading) download.percent else 0,
+                    )
+                }
+            }
+            _voicePackStates.value = states
+        }
+    }
+
+    // All voice-pack APKs share one package name, so identify the currently installed
+    // model by looking for its asset folder inside the installed engine APK.
+    private fun detectInstalledVoicePackModel(): String? {
+        val engine = _engines.value.firstOrNull(::isSherpaEngine)?.packageName ?: return null
+        val apkPath = runCatching {
+            getApplication<Application>().packageManager.getApplicationInfo(engine, 0).sourceDir
+        }.getOrNull() ?: return null
+        return runCatching {
+            ZipFile(apkPath).use { zip ->
+                val assetDirs = zip.entries().asSequence()
+                    .filter { it.name.startsWith("assets/") && it.name.length > "assets/".length }
+                    .map { it.name.removePrefix("assets/").substringBefore('/').lowercase() }
+                    .toSet()
+                VOICE_PACK_OPTIONS.firstOrNull { option ->
+                    assetDirs.any { it.contains(option.assetKey) }
+                }?.model
+            }
+        }.getOrNull()
+    }
+
+    private fun downloadVoicePack(option: VoicePackOption) {
         if (voiceDownloadId != null) {
-            _message.value = "音色正在下载，请稍候"
+            _message.value = "语音包正在下载，请稍候"
             return
         }
         val abi = Build.SUPPORTED_ABIS.firstOrNull { it in SHERPA_APK_URLS } ?: run {
-            _message.value = "当前手机处理器暂不支持此离线音色"
+            _message.value = "当前手机处理器暂不支持此离线语音包"
             return
         }
         val context = getApplication<Application>()
         val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        val fileName = "sherpa-onnx-$model-$abi.apk"
-        val url = "https://huggingface.co/csukuangfj2/sherpa-onnx-apk/resolve/main/tts-engine-new/1.13.3/" +
-            "sherpa-onnx-1.13.3-$abi-zho-tts-engine-$model.apk?download=true"
+        val fileName = "sherpa-onnx-${option.model}-$abi.apk"
+        // Hugging Face itself is frequently unreachable on mainland-mobile networks.  This
+        // HTTPS mirror serves the same public Sherpa APK and redirects to the release CDN.
+        val url = "https://hf-mirror.com/csukuangfj2/sherpa-onnx-apk/resolve/main/tts-engine-new/1.13.3/" +
+            "sherpa-onnx-1.13.3-$abi-zho-tts-engine-${option.model}.apk?download=true"
         val request = DownloadManager.Request(Uri.parse(url))
-            .setTitle("正在下载$label")
-            .setDescription("约 $sizeMb MB，下载后需要确认安装")
+            .setTitle("正在下载${option.label}")
+            .setDescription("约 ${option.sizeMb} MB，下载后需要确认安装")
             .setMimeType("application/vnd.android.package-archive")
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, fileName)
@@ -288,30 +382,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         voiceDownloadId = id
-        _message.value = "已开始下载$label（约 $sizeMb MB）"
+        _voicePackDownload.value = VoicePackDownload(option.model, 0)
+        refreshVoicePackStates()
+        _message.value = "已开始下载${option.label}（约 ${option.sizeMb} MB）"
         viewModelScope.launch {
             while (voiceDownloadId == id) {
                 delay(1_000)
                 manager.query(DownloadManager.Query().setFilterById(id))?.use { cursor ->
                     if (!cursor.moveToFirst()) return@use
-                    when (cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))) {
+                    val statusColumn = cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)
+                    when (cursor.getInt(statusColumn)) {
+                        DownloadManager.STATUS_RUNNING, DownloadManager.STATUS_PAUSED -> {
+                            val total = cursor.getLong(
+                                cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
+                            )
+                            val done = cursor.getLong(
+                                cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
+                            )
+                            if (total > 0) {
+                                _voicePackDownload.value =
+                                    VoicePackDownload(option.model, (done * 100 / total).toInt())
+                            }
+                        }
                         DownloadManager.STATUS_SUCCESSFUL -> {
                             voiceDownloadId = null
-                            clearTtsAudioCache()
+                            val percent = _voicePackDownload.value?.percent ?: 100
+                            _voicePackDownload.value = null
                             val apk = manager.getUriForDownloadedFile(id)
                             if (apk == null) {
                                 _message.value = "下载完成，但无法打开安装包"
                             } else {
-                                _message.value = "下载完成，请在系统页面确认安装"
-                                context.startActivity(Intent(Intent.ACTION_VIEW).apply {
-                                    setDataAndType(apk, "application/vnd.android.package-archive")
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                })
+                                appSettings.setInstalledVoicePack(option.model)
+                                val opened = runCatching {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW).apply {
+                                        setDataAndType(apk, "application/vnd.android.package-archive")
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    })
+                                }.isSuccess
+                                _message.value = when {
+                                    !opened -> "下载完成。请在设置中允许本应用安装未知应用后重试安装"
+                                    else -> "下载完成（$percent%），请在系统页面确认安装${option.label}"
+                                }
                             }
+                            refreshVoicePackStates()
                         }
                         DownloadManager.STATUS_FAILED -> {
                             voiceDownloadId = null
-                            _message.value = "音色下载失败，请检查网络后重试"
+                            _voicePackDownload.value = null
+                            val reason = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
+                            _message.value = "语音包下载失败：${downloadFailureReason(reason)}"
+                            refreshVoicePackStates()
                         }
                     }
                 }
@@ -352,22 +472,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (opened) {
             waitingForEngineSettings = true
-            _message.value = "请选择 Speaker ID；返回后重新播放本章即可生效"
+            _message.value = "请在引擎设置中选择说话人（Speaker ID）；返回后重新播放本章即可生效"
         } else {
-            _message.value = "无法打开 Sherpa 设置，请确认 137 MB TTS Engine 已完成安装"
+            _message.value = "无法打开离线引擎设置，请确认语音包已完成安装"
         }
-    }
-
-    private fun clearTtsAudioCache() {
-        val application = getApplication<Application>()
-        application.cacheDir.resolve("tts").deleteRecursively()
-        application.filesDir.resolve("tts-audio").deleteRecursively()
     }
 
     fun onHostResume() {
         refreshVoiceEngines()
+        refreshVoicePackStates()
         if (waitingForEngineSettings) {
             waitingForEngineSettings = false
+            // The speaker may have changed inside the engine app; bump the cache epoch so
+            // stale audio is regenerated instead of being auto-deleted.
+            viewModelScope.launch { appSettings.bumpTtsCacheEpoch() }
             resetVoiceEngine()
             _message.value = "音色设置已刷新，请重新点击播放"
         }
@@ -375,7 +493,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun resetVoiceEngine() {
         _playbackPreparing.value = false
-        clearTtsAudioCache()
         val context = getApplication<Application>()
         context.startService(Intent(context, PlaybackService::class.java).apply {
             action = PlaybackService.ACTION_RESET_VOICE_ENGINE
@@ -404,6 +521,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun downloadFailureReason(reason: Int): String = when (reason) {
+        DownloadManager.ERROR_INSUFFICIENT_SPACE -> "存储空间不足"
+        DownloadManager.ERROR_DEVICE_NOT_FOUND -> "下载存储不可用"
+        DownloadManager.ERROR_FILE_ALREADY_EXISTS -> "同名下载文件异常，请重试"
+        DownloadManager.ERROR_CANNOT_RESUME -> "网络中断，无法续传"
+        DownloadManager.ERROR_HTTP_DATA_ERROR -> "下载服务器或网络连接异常"
+        DownloadManager.ERROR_TOO_MANY_REDIRECTS -> "下载地址重定向过多"
+        DownloadManager.ERROR_UNHANDLED_HTTP_CODE -> "下载服务器拒绝了请求"
+        else -> "请检查网络、存储空间后重试（错误码 $reason）"
+    }
+
     fun textBlocks(): List<String> = _selectedChapter.value?.let { TextChunker.chunk(it.content) }.orEmpty()
 
     private fun launchBusy(successMessage: String, block: suspend () -> Unit) {
@@ -425,6 +553,73 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 }
 
 data class TtsEngineOption(val label: String, val packageName: String)
+
+data class VoicePackOption(
+    val model: String,
+    val label: String,
+    val sizeMb: Int,
+    // Distinctive fragment of the model's asset folder inside the engine APK,
+    // used to detect which pack is currently installed.
+    val assetKey: String,
+)
+
+data class VoicePackUiState(
+    val option: VoicePackOption,
+    val downloaded: Boolean,
+    val installed: Boolean,
+    val lastInstalled: Boolean,
+    val downloading: Boolean,
+    val progressPercent: Int,
+)
+
+data class VoicePackDownload(val model: String, val percent: Int)
+
+// Curated Chinese voice packs.  All of them are verified to exist on the
+// hf-mirror.com release CDN for every supported ABI at sherpa-onnx 1.13.3.
+val VOICE_PACK_OPTIONS = listOf(
+    VoicePackOption(
+        model = "vits-zh-hf-fanchen-wnj",
+        label = "中文男声（单说话人）",
+        sizeMb = 131,
+        assetKey = "fanchen",
+    ),
+    VoicePackOption(
+        model = "sherpa-onnx-vits-zh-ll",
+        label = "中文女声 · 多说话人（5 种）",
+        sizeMb = 130,
+        assetKey = "vits-zh-ll",
+    ),
+    VoicePackOption(
+        model = "vits-piper-zh_CN-huayan-medium",
+        label = "中文女声 · huayan",
+        sizeMb = 83,
+        assetKey = "huayan",
+    ),
+    VoicePackOption(
+        model = "vits-piper-zh_CN-chaowen-medium",
+        label = "中文男声 · chaowen",
+        sizeMb = 75,
+        assetKey = "chaowen",
+    ),
+    VoicePackOption(
+        model = "vits-icefall-zh-aishell3",
+        label = "中文多说话人 · aishell3（最省空间）",
+        sizeMb = 50,
+        assetKey = "aishell3",
+    ),
+    VoicePackOption(
+        model = "vits-melo-tts-zh_en",
+        label = "中英双语 · 多说话人",
+        sizeMb = 176,
+        assetKey = "melo-tts",
+    ),
+    VoicePackOption(
+        model = "matcha-icefall-zh-baker",
+        label = "中文女声 · baker（matcha）",
+        sizeMb = 138,
+        assetKey = "baker",
+    ),
+)
 
 private fun isSherpaEngine(engine: TtsEngineOption): Boolean =
     engine.packageName.contains("sherpa", ignoreCase = true) ||

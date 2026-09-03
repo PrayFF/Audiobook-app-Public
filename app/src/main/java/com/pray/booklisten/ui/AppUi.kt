@@ -427,7 +427,8 @@ private fun PlayerScreen(viewModel: MainViewModel) {
     val chapters by viewModel.chapters.collectAsState()
     val playback by viewModel.playback.state.collectAsState()
     val settings by viewModel.settings.collectAsState()
-    val voices by viewModel.voices.collectAsState()
+    val voicePackStates by viewModel.voicePackStates.collectAsState()
+    val voicePackDownload by viewModel.voicePackDownload.collectAsState()
     val engines by viewModel.engines.collectAsState()
     val playbackPreparing by viewModel.playbackPreparing.collectAsState()
     val blocks = remember(chapter?.content) { viewModel.textBlocks() }
@@ -552,7 +553,10 @@ private fun PlayerScreen(viewModel: MainViewModel) {
                         }
                     }
                 }
-                TextButton(onClick = { voiceDialog = true }) { Text("音色") }
+                TextButton(onClick = {
+                    viewModel.refreshVoicePackStates()
+                    voiceDialog = true
+                }) { Text("音色") }
                 Box {
                     TextButton(onClick = { timerMenu = true }) { Text("定时") }
                     DropdownMenu(expanded = timerMenu, onDismissRequest = { timerMenu = false }) {
@@ -583,42 +587,91 @@ private fun PlayerScreen(viewModel: MainViewModel) {
         onDismissRequest = { voiceDialog = false },
         title = { Text("离线语音与音色") },
         text = {
-            LazyColumn(Modifier.height(360.dp)) {
+            val anyDownloading = voicePackStates.any { it.downloading }
+            LazyColumn(Modifier.height(420.dp)) {
                 item {
-                    Button(onClick = viewModel::downloadNeuralVoice, modifier = Modifier.fillMaxWidth()) {
-                        Text("下载中文多音色（5 种，约 137 MB）")
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedButton(onClick = viewModel::downloadMaleVoice, modifier = Modifier.fillMaxWidth()) {
-                        Text("下载固定中文男声（约 133 MB）")
-                    }
-                    Text(
-                        "下载后请确认安装；返回本应用会自动识别。音色在手机本地运行，不上传书籍正文。",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(vertical = 8.dp),
-                    )
-                    OutlinedButton(onClick = viewModel::rescanVoiceEngines, modifier = Modifier.fillMaxWidth()) {
-                        Text("重新扫描已安装的音色")
-                    }
-                    if (settings.ttsEngine.isNotBlank()) {
-                        OutlinedButton(onClick = viewModel::openEngineVoiceSettings, modifier = Modifier.fillMaxWidth()) {
-                            Text("打开引擎设置（选择 Speaker ID）")
-                        }
-                    }
                     Text("语音引擎", fontWeight = FontWeight.Bold)
                 }
-                items(engines) { engine ->
+                items(engines, key = { it.packageName }) { engine ->
                     TextButton(onClick = { viewModel.setEngine(engine.packageName) }, modifier = Modifier.fillMaxWidth()) {
                         Text(if (engine.packageName == settings.ttsEngine) "✓ ${engine.label}" else engine.label)
                     }
                 }
                 item {
-                    Text("音色", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
-                    TextButton(onClick = { viewModel.setVoice("") }) { Text("引擎默认音色") }
+                    Text("语音包（点击直接下载）", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 10.dp))
+                    Text(
+                        "语音包就是离线音色，在手机本地运行，不上传书籍正文。各语音包共用同一个离线引擎：安装新的会替换当前离线音色，但已下载的安装包和各音色的朗读缓存都会保留，切换时不会自动删除。",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(vertical = 6.dp),
+                    )
                 }
-                items(voices) { voice ->
-                    TextButton(onClick = { viewModel.setVoice(voice); voiceDialog = false }) {
-                        Text(voice, maxLines = 2)
+                val notDownloaded = voicePackStates.filter { !it.downloaded }
+                items(notDownloaded, key = { it.option.model }) { state ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(state.option.label)
+                            Text("约 ${state.option.sizeMb} MB", style = MaterialTheme.typography.bodySmall)
+                        }
+                        TextButton(
+                            enabled = !anyDownloading,
+                            onClick = { viewModel.selectVoicePack(state.option) },
+                        ) {
+                            Text(
+                                if (state.downloading) "下载中 ${voicePackDownload?.percent ?: 0}%"
+                                else "下载"
+                            )
+                        }
+                    }
+                }
+                item {
+                    Text("已下载的语音包", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 10.dp))
+                }
+                val downloaded = voicePackStates.filter { it.downloaded }
+                if (downloaded.isEmpty()) {
+                    item {
+                        Text(
+                            "还没有已下载的语音包。下载过的安装包会保存在本机，可随时重装或删除。",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(vertical = 4.dp),
+                        )
+                    }
+                }
+                items(downloaded, key = { it.option.model }) { state ->
+                    val tag = when {
+                        state.installed -> " · 当前使用"
+                        state.lastInstalled -> " · 上次安装"
+                        else -> ""
+                    }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(state.option.label + tag)
+                            Text("约 ${state.option.sizeMb} MB", style = MaterialTheme.typography.bodySmall)
+                        }
+                        if (state.downloading) {
+                            Text("下载中 ${voicePackDownload?.percent ?: 0}%", style = MaterialTheme.typography.bodySmall)
+                        } else {
+                            TextButton(onClick = { viewModel.installVoicePack(state.option) }) {
+                                Text(if (state.installed) "重装" else "安装")
+                            }
+                            TextButton(onClick = { viewModel.deleteVoicePack(state.option) }) { Text("删除") }
+                        }
+                    }
+                }
+                item {
+                    Spacer(Modifier.height(8.dp))
+                    if (settings.ttsEngine.isNotBlank()) {
+                        OutlinedButton(onClick = viewModel::openEngineVoiceSettings, modifier = Modifier.fillMaxWidth()) {
+                            Text("打开引擎设置（选择说话人）")
+                        }
+                    }
+                    OutlinedButton(onClick = viewModel::rescanVoiceEngines, modifier = Modifier.fillMaxWidth()) {
+                        Text("重新扫描已安装的引擎")
                     }
                 }
             }

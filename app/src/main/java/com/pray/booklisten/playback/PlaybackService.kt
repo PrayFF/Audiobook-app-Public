@@ -42,6 +42,7 @@ class PlaybackService : MediaSessionService() {
     private var currentChapterIndex = 0
     private var currentVoiceName = ""
     private var currentEnginePackage = ""
+    private var currentCacheEpoch = 0
     private var engineResetNeeded = false
     private var synthesisComplete = false
     private var stopAfterChapter = false
@@ -84,6 +85,7 @@ class PlaybackService : MediaSessionService() {
                 startPosition = intent.getLongExtra(EXTRA_POSITION_MS, 0),
                 voiceName = intent.getStringExtra(EXTRA_VOICE_NAME).orEmpty(),
                 enginePackage = intent.getStringExtra(EXTRA_TTS_ENGINE).orEmpty(),
+                cacheEpoch = intent.getIntExtra(EXTRA_TTS_CACHE_EPOCH, 0),
                 speed = intent.getFloatExtra(EXTRA_SPEED, 1f),
                 )
             }
@@ -101,6 +103,7 @@ class PlaybackService : MediaSessionService() {
         startPosition: Long,
         voiceName: String,
         enginePackage: String,
+        cacheEpoch: Int,
         speed: Float,
     ) {
         synthesisJob?.cancel()
@@ -114,6 +117,7 @@ class PlaybackService : MediaSessionService() {
         currentBookId = bookId
         currentChapterIndex = chapterIndex
         currentVoiceName = voiceName
+        currentCacheEpoch = cacheEpoch
         if (enginePackage != currentEnginePackage || engineResetNeeded) {
             synthesizer.shutdown()
             synthesizer = TtsSynthesizer(this, enginePackage)
@@ -209,8 +213,13 @@ class PlaybackService : MediaSessionService() {
         voiceName: String,
         text: String,
     ): File {
+        // The cache key includes the engine's install timestamp (voice-pack APKs share one
+        // package name, so a replacing install must not reuse old audio) and a cache epoch
+        // (bumped when the in-engine speaker selection changes).  Nothing is ever deleted
+        // on switch; stale entries are simply left for the cache-cleanup worker.
         val digest = sha256(
-            "$TTS_CACHE_VERSION:$bookId:$chapterIndex:$blockIndex:$enginePackage:$voiceName:$text"
+            "$TTS_CACHE_VERSION:$bookId:$chapterIndex:$blockIndex:" +
+                "${engineSignature(enginePackage)}:$voiceName:$currentCacheEpoch:$text"
         ).take(20)
         val persistent = File(filesDir, "tts-audio/$digest.wav")
         if (!persistent.exists()) {
@@ -223,13 +232,21 @@ class PlaybackService : MediaSessionService() {
         return persistent
     }
 
+    private fun engineSignature(enginePackage: String): String {
+        if (enginePackage.isBlank()) return "default"
+        val updateTime = runCatching {
+            packageManager.getPackageInfo(enginePackage, 0).lastUpdateTime
+        }.getOrDefault(0L)
+        return "$enginePackage@$updateTime"
+    }
+
     private fun playNextChapter() {
         val bookId = currentBookId.takeIf(String::isNotBlank) ?: return
         val nextIndex = currentChapterIndex + 1
         scope.launch {
             val app = application as BookListenApplication
             val next = app.repository.getChapter(bookId, nextIndex) ?: return@launch
-            loadChapter(bookId, next.chapterIndex, 0, 0, currentVoiceName, currentEnginePackage, player.playbackParameters.speed)
+            loadChapter(bookId, next.chapterIndex, 0, 0, currentVoiceName, currentEnginePackage, currentCacheEpoch, player.playbackParameters.speed)
         }
     }
 
@@ -311,8 +328,8 @@ class PlaybackService : MediaSessionService() {
         synthesisComplete = false
         player.stop()
         player.clearMediaItems()
-        cacheDir.resolve("tts").deleteRecursively()
-        filesDir.resolve("tts-audio").deleteRecursively()
+        // Cached audio is deliberately kept: it is keyed per engine install time and cache
+        // epoch, so stale files are simply not reused and are evicted by the cleanup worker.
         engineResetNeeded = true
     }
 
@@ -347,10 +364,11 @@ class PlaybackService : MediaSessionService() {
         const val EXTRA_POSITION_MS = "position_ms"
         const val EXTRA_VOICE_NAME = "voice_name"
         const val EXTRA_TTS_ENGINE = "tts_engine"
+        const val EXTRA_TTS_CACHE_EPOCH = "tts_cache_epoch"
         const val EXTRA_SPEED = "speed"
         const val EXTRA_MINUTES = "minutes"
         private const val PREPARING_CHANNEL = "booklisten_playback"
         private const val PREPARING_NOTIFICATION_ID = 2401
-        private const val TTS_CACHE_VERSION = 3
+        private const val TTS_CACHE_VERSION = 4
     }
 }
