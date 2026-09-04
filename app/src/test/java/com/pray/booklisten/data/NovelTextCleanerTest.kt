@@ -71,4 +71,26 @@ class NovelTextCleanerTest {
         )
         assertEquals("第二章 进山\n\n山路在雨后泛着微光。", result)
     }
+
+    @Test fun keepsShortChapterAfterNavigationWithChapterHeading() {
+        // Regression: nitian.935666.xyz style pages put "上一章/下一章：第X章" navigation and an
+        // obfuscated anti-scraping notice *before* a short chapter body.  The navigation line
+        // mentions a chapter heading, which used to trip the chapter-title guard and stop the edge
+        // scan; the footer scan then mistook the anti-scraping notice for the start of the footer
+        // and truncated the entire narrative.
+        val result = NovelTextCleaner.clean(
+            """
+            上一章：返回列表
+            下一章：第一章 白纸人和鼠友
+            如果被/浏/览/器/强/制进入它们的阅/读/模/式了,阅读体/验极/差请退出转/码阅读.
+            盗墓不是游览观光，不是吟诗作对。古代贵族们建造坟墓的时候，一定是想方设法地防止被盗。
+            """.trimIndent(),
+            title = "引子",
+        )
+        assertTrue(result.startsWith("盗墓不是游览观光"))
+        assertTrue(result.contains("古代贵族们建造坟墓"))
+        assertFalse(result.contains("上一章"))
+        assertFalse(result.contains("下一章"))
+        assertFalse(result.contains("退出转码"))
+    }
 }

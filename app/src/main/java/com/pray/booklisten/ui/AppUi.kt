@@ -818,7 +818,7 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
                                     pageLoading = false
                                     val hint = when (error?.errorCode) {
                                         WebViewClient.ERROR_HOST_LOOKUP -> "域名解析失败，该站点可能已被屏蔽或域名失效"
-                                        WebViewClient.ERROR_CONNECT -> "无法连接服务器，站点可能屏蔽了应用访问或网络受限"
+                                        WebViewClient.ERROR_CONNECT -> "连接被拒绝，很可能是域名被污染（解析到了无效地址），请尝试更换 DNS 或使用代理"
                                         WebViewClient.ERROR_TIMEOUT -> "连接超时，请检查网络后重试"
                                         else -> error?.description?.toString() ?: "请检查网址和网络"
                                     }

@@ -25,6 +25,11 @@ object NovelTextCleaner {
     private val chapterMarker = Regex(
         "(?:正文\\s*)?(?:第[零〇○一二三四五六七八九十百千万两0-9０-９._—-]{1,16}[章回节卷部篇]|序章|楔子|引子|前言)",
     )
+    // "下一章：第一章 白纸人和鼠友" style navigation — a paging token immediately followed by a
+    // chapter heading.  Applied on the already-compacted text, so separators are already gone.
+    private val navigationToChapterHeading = Regex(
+        "^(上一章|下一章|上一篇|下一篇|返回列表|返回目录|目录)[\\s:：]*第[零〇○一二三四五六七八九十百千万两0-9０-９]+[章回节卷部篇]",
+    )
 
     fun clean(raw: String, title: String = ""): String {
         // A row of '=' is typically inserted between the site header and the chapter body.
@@ -105,7 +110,12 @@ object NovelTextCleaner {
 
     private fun isEdgeLine(line: String, words: List<String>, title: String): Boolean {
         val compact = compactForMatch(line)
-        if (compact.length > 180 || chapterTitle.matches(line) || chapterMarker.containsMatchIn(line)) return false
+        if (compact.length > 180 || chapterTitle.matches(line)) return false
+        // A navigation line that also contains a chapter heading (e.g. "下一章：第一章 白纸人和鼠友")
+        // is still site chrome.  This must win over the chapter-title guard below, otherwise such a
+        // line stops the edge scan and leaks navigation into the extracted narrative.
+        if (navigationToChapterHeading.containsMatchIn(compact)) return true
+        if (chapterMarker.containsMatchIn(line)) return false
         if (title.isNotBlank() && compact == title.replace(" ", "")) return false
         val matches = words.count { compact.contains(it) }
         val chromeMatches = chromeWords.count { compact.contains(it) }
