@@ -525,6 +525,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun delete(book: BookEntity) = viewModelScope.launch { repository.delete(book) }
 
+    // ------------------------------------------------------------------
+    // 收藏夹（书单）与书架排序
+    // ------------------------------------------------------------------
+
+    val collections = repository.observeCollections()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun createCollection(name: String) = launchBusy("收藏夹已创建") {
+        repository.createCollection(name)
+    }
+
+    fun renameCollection(collectionId: String, newName: String) = launchBusy("收藏夹已重命名") {
+        repository.renameCollection(collectionId, newName)
+    }
+
+    fun deleteCollection(collectionId: String) = launchBusy("收藏夹已删除（书籍保留在书架）") {
+        repository.deleteCollection(collectionId)
+    }
+
+    fun moveBookToCollection(bookId: String, collectionId: String?) = launchBusy(
+        if (collectionId == null) "已移出收藏夹" else "已加入收藏夹",
+    ) {
+        repository.moveBookToCollection(bookId, collectionId)
+    }
+
+    fun moveBook(visibleBooks: List<BookEntity>, bookId: String, up: Boolean) {
+        viewModelScope.launch { repository.moveBook(visibleBooks, bookId, up) }
+    }
+
     fun renameBook(book: BookEntity, newTitle: String) = launchBusy("书名已更新") {
         repository.renameBook(book.id, newTitle)
         if (_selectedBook.value?.id == book.id) {
@@ -542,6 +571,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun renameChapters(titles: Map<Int, String>) = launchBusy("章节名已批量更新") {
         val book = _selectedBook.value ?: return@launchBusy
         repository.renameChapters(book.id, titles)
+    }
+
+    fun resetChapterTitle(chapterIndex: Int) = launchBusy("已恢复默认章节名") {
+        val book = _selectedBook.value ?: return@launchBusy
+        repository.resetChapterTitle(book.id, chapterIndex)
+        _selectedChapter.value = repository.getChapter(book.id, chapterIndex) ?: _selectedChapter.value
+    }
+
+    fun resetAllChapterTitles() = launchBusy("已恢复全部默认章节名") {
+        val book = _selectedBook.value ?: return@launchBusy
+        repository.resetAllChapterTitles(book.id)
+    }
+
+    fun setLibraryLayout(grid: Boolean) {
+        viewModelScope.launch { appSettings.setLibraryLayout(if (grid) "grid" else "list") }
     }
 
     private fun downloadFailureReason(reason: Int): String = when (reason) {

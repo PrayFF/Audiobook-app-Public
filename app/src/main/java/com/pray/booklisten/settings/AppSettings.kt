@@ -18,6 +18,8 @@ data class ReaderSettings(
     val installedVoicePack: String = "",
     val ttsCacheEpoch: Int = 0,
     val searchEngine: String = "https://cn.bing.com/search?q=",
+    // "list" (default) or "grid" for the library shelf layout.
+    val libraryLayout: String = "list",
 )
 
 class AppSettings(private val context: Context) {
@@ -28,6 +30,7 @@ class AppSettings(private val context: Context) {
         val installedVoicePack = stringPreferencesKey("installed_voice_pack")
         val ttsCacheEpoch = intPreferencesKey("tts_cache_epoch")
         val search = stringPreferencesKey("search_engine")
+        val libraryLayout = stringPreferencesKey("library_layout")
     }
 
     val values: Flow<ReaderSettings> = context.dataStore.data.map {
@@ -38,12 +41,15 @@ class AppSettings(private val context: Context) {
             installedVoicePack = it[Keys.installedVoicePack].orEmpty(),
             ttsCacheEpoch = it[Keys.ttsCacheEpoch] ?: 0,
             searchEngine = it[Keys.search] ?: "https://cn.bing.com/search?q=",
+            libraryLayout = it[Keys.libraryLayout] ?: "list",
         )
     }
 
     suspend fun setSpeed(value: Float) = context.dataStore.edit { it[Keys.speed] = value }
     suspend fun setEngine(value: String) = context.dataStore.edit { it[Keys.engine] = value }
     suspend fun setVoice(value: String) = context.dataStore.edit { it[Keys.voice] = value }
+    suspend fun setLibraryLayout(value: String) =
+        context.dataStore.edit { it[Keys.libraryLayout] = if (value == "grid") "grid" else "list" }
     suspend fun setInstalledVoicePack(value: String) =
         context.dataStore.edit { it[Keys.installedVoicePack] = value }
 

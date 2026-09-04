@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.room.withTransaction
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
@@ -67,7 +68,7 @@ class BookRepository(
         // exactly like before.
         val catalog = page.catalogUrl?.let { runCatching { WebCatalogParser.fetchCatalog(it) }.getOrNull() }
         val chapters = if (catalog.isNullOrEmpty()) {
-            listOf(ParsedChapter(page.title, content, page.url, page.nextUrl))
+            listOf(ParsedChapter(page.title, content, page.url, page.nextUrl, page.title))
         } else {
             buildCatalogChapters(catalog, page.title, content, page.url)
         }
@@ -93,16 +94,16 @@ class BookRepository(
         for (entry in catalog) {
             val isCurrent = entry.url.trimEnd('/', '#') == normalizedCurrent
             if (isCurrent) {
-                chapters.add(ParsedChapter(currentTitle, currentContent, currentUrl, null))
+                chapters.add(ParsedChapter(currentTitle, currentContent, currentUrl, null, entry.title))
                 matched = true
             } else {
-                chapters.add(ParsedChapter(entry.title, "", entry.url, null))
+                chapters.add(ParsedChapter(entry.title, "", entry.url, null, entry.title))
             }
         }
         // If the current chapter wasn't in the catalog, still include it so the user can read
         // the chapter they just opened.
         if (!matched) {
-            chapters.add(ParsedChapter(currentTitle, currentContent, currentUrl, null))
+            chapters.add(ParsedChapter(currentTitle, currentContent, currentUrl, null, currentTitle))
         }
         return chapters
     }
@@ -121,7 +122,10 @@ class BookRepository(
         // Keep a user-renamed title; otherwise adopt the page's own chapter heading.
         val title = chapter.title.takeIf { it.isNotBlank() }
             ?: page.title.ifBlank { chapter.title }
-        val updated = chapter.copy(content = content, title = title)
+        // Fill in the default title on first fetch so "restore default name" works even for
+        // placeholder chapters created before this field existed.
+        val defaultTitle = chapter.defaultTitle.ifBlank { page.title.ifBlank { title } }
+        val updated = chapter.copy(content = content, title = title, defaultTitle = defaultTitle)
         dao.upsertChapters(listOf(updated))
         return updated
     }
@@ -161,6 +165,78 @@ class BookRepository(
         if (updates.isNotEmpty()) dao.upsertChapters(updates)
     }
 
+    /** Restores a chapter's original (source-extracted) title after a user rename. */
+    suspend fun resetChapterTitle(bookId: String, chapterIndex: Int) {
+        val chapter = dao.getChapter(bookId, chapterIndex) ?: return
+        val default = chapter.defaultTitle
+        if (default.isBlank() || default == chapter.title) return
+        dao.upsertChapters(listOf(chapter.copy(title = default)))
+    }
+
+    /** Restores every chapter of a book to its original title (where known). */
+    suspend fun resetAllChapterTitles(bookId: String) {
+        val chapters = dao.getChapters(bookId)
+        val updates = chapters.filter { it.defaultTitle.isNotBlank() && it.defaultTitle != it.title }
+            .map { it.copy(title = it.defaultTitle) }
+        if (updates.isNotEmpty()) dao.upsertChapters(updates)
+    }
+
+    // ------------------------------------------------------------------
+    // Shelf collections ("收藏夹 / 书单") and manual ordering.
+    // ------------------------------------------------------------------
+
+    fun observeCollections(): Flow<List<CollectionEntity>> = dao.observeCollections()
+
+    suspend fun createCollection(name: String): String {
+        val title = name.trim().replace(Regex("\\s+"), " ")
+        require(title.isNotEmpty()) { "收藏夹名称不能为空" }
+        require(title.length <= 50) { "收藏夹名称不能超过 50 个字符" }
+        val existing = getCollectionsOnce()
+        val id = UUID.randomUUID().toString()
+        dao.upsertCollections(listOf(CollectionEntity(id, title, position = existing.size)))
+        return id
+    }
+
+    suspend fun renameCollection(collectionId: String, newName: String) {
+        val title = newName.trim().replace(Regex("\\s+"), " ")
+        require(title.isNotEmpty()) { "收藏夹名称不能为空" }
+        require(title.length <= 50) { "收藏夹名称不能超过 50 个字符" }
+        val target = getCollectionsOnce().firstOrNull { it.id == collectionId } ?: error("没有找到该收藏夹")
+        dao.upsertCollections(listOf(target.copy(name = title)))
+    }
+
+    /** Deletes a collection; books inside simply become ungrouped. */
+    suspend fun deleteCollection(collectionId: String) {
+        dao.clearCollection(collectionId)
+        dao.deleteCollection(collectionId)
+    }
+
+    suspend fun getCollectionsOnce(): List<CollectionEntity> = dao.observeCollections().first()
+
+    suspend fun moveBookToCollection(bookId: String, collectionId: String?) {
+        val book = dao.getBook(bookId) ?: return
+        dao.updateBook(book.copy(collectionId = collectionId))
+    }
+
+    /**
+     * Moves a book one slot up/down within the given visible list.  The visible order is first
+     * materialized into `sortOrder`, so the result always matches what the user currently sees.
+     */
+    suspend fun moveBook(visibleBooks: List<BookEntity>, bookId: String, up: Boolean) {
+        val index = visibleBooks.indexOfFirst { it.id == bookId }
+        if (index < 0) return
+        val swapWith = if (up) index - 1 else index + 1
+        if (swapWith !in visibleBooks.indices) return
+        val materialized = visibleBooks.mapIndexed { position, book -> book.copy(sortOrder = position) }
+            .toMutableList()
+        val a = materialized[index]
+        val b = materialized[swapWith]
+        materialized[index] = b.copy(sortOrder = index)
+        materialized[swapWith] = a.copy(sortOrder = swapWith)
+        dao.updateBook(materialized[index])
+        dao.updateBook(materialized[swapWith])
+    }
+
     suspend fun cleanStoredWebBook(bookId: String) = withContext(Dispatchers.IO) {
         val chapters = dao.getChapters(bookId)
         val cleaned = chapters.map { chapter ->
@@ -196,7 +272,15 @@ class BookRepository(
     private suspend fun saveParsedBook(parsed: ParsedBook, type: SourceType, sourceUri: String): String {
         val id = UUID.randomUUID().toString()
         val chapters = parsed.chapters.mapIndexed { index, chapter ->
-            ChapterEntity(id, index, chapter.title, chapter.content, chapter.sourceUrl, chapter.nextUrl)
+            ChapterEntity(
+                bookId = id,
+                chapterIndex = index,
+                title = chapter.title,
+                content = chapter.content,
+                sourceUrl = chapter.sourceUrl,
+                nextUrl = chapter.nextUrl,
+                defaultTitle = chapter.defaultTitle.ifBlank { chapter.title },
+            )
         }
         database.withTransaction {
             dao.upsertBook(

@@ -10,8 +10,11 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface BookDao {
-    @Query("SELECT * FROM books ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM books ORDER BY sortOrder ASC, updatedAt DESC")
     fun observeBooks(): Flow<List<BookEntity>>
+
+    @Query("SELECT * FROM books ORDER BY sortOrder ASC, updatedAt DESC")
+    suspend fun getBooksOnce(): List<BookEntity>
 
     @Query("SELECT * FROM books WHERE id = :id")
     suspend fun getBook(id: String): BookEntity?
@@ -39,5 +42,18 @@ interface BookDao {
 
     @Query("DELETE FROM chapters WHERE bookId = :bookId")
     suspend fun deleteChapters(bookId: String)
-}
 
+    // ---- Shelf collections ----
+
+    @Query("SELECT * FROM collections ORDER BY position ASC, createdAt ASC")
+    fun observeCollections(): Flow<List<CollectionEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertCollections(collections: List<CollectionEntity>)
+
+    @Query("DELETE FROM collections WHERE id = :id")
+    suspend fun deleteCollection(id: String)
+
+    @Query("UPDATE books SET collectionId = NULL WHERE collectionId = :collectionId")
+    suspend fun clearCollection(collectionId: String)
+}

@@ -14,11 +14,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -28,6 +30,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -35,6 +41,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -68,6 +75,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.pray.booklisten.MainViewModel
 import com.pray.booklisten.data.BookEntity
 import com.pray.booklisten.data.ChapterProgress
+import com.pray.booklisten.data.CollectionEntity
 import com.pray.booklisten.data.ExtractedWebPage
 import com.pray.booklisten.data.SourceType
 import com.pray.booklisten.data.WebBookTitleResolver
@@ -150,52 +158,133 @@ private fun LibraryScreen(
     onBrowse: () -> Unit,
 ) {
     val books by viewModel.books.collectAsState()
+    val collections by viewModel.collections.collectAsState()
+    val settings by viewModel.settings.collectAsState()
+    val grid = settings.libraryLayout == "grid"
+    var selectedCollection by rememberSaveable { mutableStateOf<String?>(null) }
     var renameTarget by remember { mutableStateOf<BookEntity?>(null) }
     var renameText by rememberSaveable { mutableStateOf("") }
     var deleteTarget by remember { mutableStateOf<BookEntity?>(null) }
+    var newCollectionDialog by remember { mutableStateOf(false) }
+    var newCollectionText by rememberSaveable { mutableStateOf("") }
+    var manageCollections by remember { mutableStateOf(false) }
+    var renameCollectionTarget by remember { mutableStateOf<CollectionEntity?>(null) }
+    var renameCollectionText by rememberSaveable { mutableStateOf("") }
+    var deleteCollectionTarget by remember { mutableStateOf<CollectionEntity?>(null) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importFile)
     }
-    Box(Modifier.fillMaxSize()) {
-        if (books.isEmpty()) {
-            Column(
-                Modifier.align(Alignment.Center).padding(32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+    val visibleBooks = if (selectedCollection == null) {
+        books
+    } else {
+        books.filter { it.collectionId == selectedCollection }
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        // Collection filter chips + layout toggle.
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("书架还是空的", style = MaterialTheme.typography.headlineSmall)
-                Text("导入 TXT / EPUB，或从网页提取正文。所有数据只保存在本机。")
-                Button(onClick = { launcher.launch(arrayOf("*/*")) }) {
-                    Text("导入本地书籍")
-                }
-                OutlinedButton(onClick = onBrowse) { Text("联网找书") }
-            }
-        } else {
-            LazyColumn(
-                Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp, 8.dp, 12.dp, 96.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                items(books, key = { it.id }) { book ->
-                    BookCard(
-                        book = book,
-                        onClick = { onOpenBook(book) },
-                        onRename = {
-                            renameTarget = book
-                            renameText = book.title
-                        },
-                        onDelete = { deleteTarget = book },
+                FilterChip(
+                    selected = selectedCollection == null,
+                    onClick = { selectedCollection = null },
+                    label = { Text("全部") },
+                )
+                collections.forEach { collection ->
+                    FilterChip(
+                        selected = selectedCollection == collection.id,
+                        onClick = { selectedCollection = collection.id },
+                        label = { Text(collection.name, maxLines = 1) },
                     )
                 }
+                FilterChip(
+                    selected = false,
+                    onClick = { manageCollections = true },
+                    label = { Text("管理") },
+                )
+            }
+            TextButton(onClick = { viewModel.setLibraryLayout(grid = !grid) }) {
+                Text(if (grid) "列表" else "九宫格")
             }
         }
-        Row(
-            Modifier.align(Alignment.BottomEnd).padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            FloatingActionButton(onClick = onBrowse) { Text("搜") }
-            FloatingActionButton(onClick = { launcher.launch(arrayOf("*/*")) }) {
-                Text("导入")
+
+        Box(Modifier.weight(1f)) {
+            if (visibleBooks.isEmpty()) {
+                Column(
+                    Modifier.align(Alignment.Center).padding(32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        if (books.isEmpty()) "书架还是空的" else "这个收藏夹还没有书",
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                    if (books.isEmpty()) {
+                        Text("导入 TXT / EPUB，或从网页提取正文。所有数据只保存在本机。")
+                        Button(onClick = { launcher.launch(arrayOf("*/*")) }) {
+                            Text("导入本地书籍")
+                        }
+                        OutlinedButton(onClick = onBrowse) { Text("联网找书") }
+                    }
+                }
+            } else if (grid) {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(3),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp, 8.dp, 12.dp, 96.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    gridItems(visibleBooks, key = { it.id }) { book ->
+                        GridBookCard(
+                            book = book,
+                            collections = collections,
+                            inCollectionView = selectedCollection != null,
+                            onOpen = { onOpenBook(book) },
+                            onRename = { renameTarget = book; renameText = book.title },
+                            onDelete = { deleteTarget = book },
+                            onMoveToCollection = { viewModel.moveBookToCollection(book.id, it) },
+                            onNewCollection = { newCollectionDialog = true },
+                            onMoveUp = { viewModel.moveBook(visibleBooks, book.id, up = true) },
+                            onMoveDown = { viewModel.moveBook(visibleBooks, book.id, up = false) },
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp, 8.dp, 12.dp, 96.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    items(visibleBooks, key = { it.id }) { book ->
+                        BookCard(
+                            book = book,
+                            collections = collections,
+                            inCollectionView = selectedCollection != null,
+                            onOpen = { onOpenBook(book) },
+                            onRename = { renameTarget = book; renameText = book.title },
+                            onDelete = { deleteTarget = book },
+                            onMoveToCollection = { viewModel.moveBookToCollection(book.id, it) },
+                            onNewCollection = { newCollectionDialog = true },
+                            onMoveUp = { viewModel.moveBook(visibleBooks, book.id, up = true) },
+                            onMoveDown = { viewModel.moveBook(visibleBooks, book.id, up = false) },
+                        )
+                    }
+                }
+            }
+            Row(
+                Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                FloatingActionButton(onClick = onBrowse) { Text("搜") }
+                FloatingActionButton(onClick = { launcher.launch(arrayOf("*/*")) }) {
+                    Text("导入")
+                }
             }
         }
     }
@@ -243,19 +332,180 @@ private fun LibraryScreen(
             dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("取消") } },
         )
     }
+
+    if (newCollectionDialog) {
+        AlertDialog(
+            onDismissRequest = { newCollectionDialog = false },
+            title = { Text("新建收藏夹") },
+            text = {
+                OutlinedTextField(
+                    value = newCollectionText,
+                    onValueChange = { if (it.length <= 50) newCollectionText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("收藏夹名称") },
+                    supportingText = { Text("${newCollectionText.length}/50") },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = newCollectionText.isNotBlank(),
+                    onClick = {
+                        viewModel.createCollection(newCollectionText)
+                        newCollectionText = ""
+                        newCollectionDialog = false
+                    },
+                ) { Text("创建") }
+            },
+            dismissButton = { TextButton(onClick = { newCollectionDialog = false }) { Text("取消") } },
+        )
+    }
+
+    if (manageCollections) {
+        AlertDialog(
+            onDismissRequest = { manageCollections = false },
+            title = { Text("管理收藏夹") },
+            text = {
+                LazyColumn(Modifier.height(300.dp)) {
+                    if (collections.isEmpty()) {
+                        item {
+                            Text(
+                                "还没有收藏夹。通过书籍菜单里的“新建收藏夹”或下方按钮创建。",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                    items(collections, key = { it.id }) { collection ->
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                collection.name,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            TextButton(onClick = {
+                                renameCollectionTarget = collection
+                                renameCollectionText = collection.name
+                            }) { Text("重命名") }
+                            TextButton(onClick = { deleteCollectionTarget = collection }) {
+                                Text("删除", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    newCollectionText = ""
+                    newCollectionDialog = true
+                }) { Text("新建收藏夹") }
+            },
+            dismissButton = { TextButton(onClick = { manageCollections = false }) { Text("关闭") } },
+        )
+    }
+
+    renameCollectionTarget?.let { collection ->
+        AlertDialog(
+            onDismissRequest = { renameCollectionTarget = null },
+            title = { Text("重命名收藏夹") },
+            text = {
+                OutlinedTextField(
+                    value = renameCollectionText,
+                    onValueChange = { if (it.length <= 50) renameCollectionText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("收藏夹名称") },
+                    supportingText = { Text("${renameCollectionText.length}/50") },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = renameCollectionText.isNotBlank(),
+                    onClick = {
+                        viewModel.renameCollection(collection.id, renameCollectionText)
+                        renameCollectionTarget = null
+                    },
+                ) { Text("保存") }
+            },
+            dismissButton = { TextButton(onClick = { renameCollectionTarget = null }) { Text("取消") } },
+        )
+    }
+
+    deleteCollectionTarget?.let { collection ->
+        AlertDialog(
+            onDismissRequest = { deleteCollectionTarget = null },
+            title = { Text("删除收藏夹") },
+            text = { Text("确定要删除收藏夹「${collection.name}」吗？里面的书会保留在书架上，只是不再属于任何收藏夹。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.deleteCollection(collection.id)
+                        if (selectedCollection == collection.id) selectedCollection = null
+                        deleteCollectionTarget = null
+                    },
+                ) { Text("确认删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleteCollectionTarget = null }) { Text("取消") } },
+        )
+    }
+}
+
+/** The "⋯" menu shared by the list and grid book cards. */
+@Composable
+private fun BookOverflowMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    book: BookEntity,
+    collections: List<CollectionEntity>,
+    inCollectionView: Boolean,
+    onMoveToCollection: (String?) -> Unit,
+    onNewCollection: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        Text("移入收藏夹", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+        collections.forEach { collection ->
+            DropdownMenuItem(
+                text = { Text(if (book.collectionId == collection.id) "✓ ${collection.name}" else collection.name, maxLines = 1) },
+                onClick = { onDismiss(); onMoveToCollection(collection.id) },
+            )
+        }
+        DropdownMenuItem(text = { Text("新建收藏夹…") }, onClick = { onDismiss(); onNewCollection() })
+        if (inCollectionView || book.collectionId != null) {
+            DropdownMenuItem(text = { Text("移出收藏夹") }, onClick = { onDismiss(); onMoveToCollection(null) })
+        }
+        Text("排序", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+        DropdownMenuItem(text = { Text("上移") }, onClick = { onDismiss(); onMoveUp() })
+        DropdownMenuItem(text = { Text("下移") }, onClick = { onDismiss(); onMoveDown() })
+        DropdownMenuItem(text = { Text("重命名") }, onClick = { onDismiss(); onRename() })
+        DropdownMenuItem(text = { Text("删除") }, onClick = { onDismiss(); onDelete() })
+    }
 }
 
 @Composable
 private fun BookCard(
     book: BookEntity,
-    onClick: () -> Unit,
+    collections: List<CollectionEntity>,
+    inCollectionView: Boolean,
+    onOpen: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
+    onMoveToCollection: (String?) -> Unit,
+    onNewCollection: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth()
             .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(18.dp))
-            .clickable(onClick = onClick)
+            .clickable(onClick = onOpen)
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -267,10 +517,77 @@ private fun BookCard(
             Text(book.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text("${book.totalChapters} 章 · ${book.sourceType.name}", style = MaterialTheme.typography.bodySmall)
         }
-        Column(horizontalAlignment = Alignment.End) {
-            TextButton(onClick = onRename) { Text("重命名") }
-            TextButton(onClick = onDelete) { Text("删除") }
+        Box {
+            TextButton(onClick = { menuOpen = true }) { Text("⋯") }
+            BookOverflowMenu(
+                expanded = menuOpen,
+                onDismiss = { menuOpen = false },
+                book = book,
+                collections = collections,
+                inCollectionView = inCollectionView,
+                onMoveToCollection = onMoveToCollection,
+                onNewCollection = onNewCollection,
+                onMoveUp = onMoveUp,
+                onMoveDown = onMoveDown,
+                onRename = onRename,
+                onDelete = onDelete,
+            )
         }
+    }
+}
+
+@Composable
+private fun GridBookCard(
+    book: BookEntity,
+    collections: List<CollectionEntity>,
+    inCollectionView: Boolean,
+    onOpen: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+    onMoveToCollection: (String?) -> Unit,
+    onNewCollection: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Column(
+        Modifier.fillMaxWidth().clickable(onClick = onOpen),
+    ) {
+        Box(
+            Modifier.fillMaxWidth().aspectRatio(0.72f)
+                .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(14.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                book.title.take(1).ifBlank { if (book.sourceType == SourceType.WEB) "网" else "书" },
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Box(Modifier.align(Alignment.TopEnd)) {
+                TextButton(onClick = { menuOpen = true }) { Text("⋯") }
+                BookOverflowMenu(
+                    expanded = menuOpen,
+                    onDismiss = { menuOpen = false },
+                    book = book,
+                    collections = collections,
+                    inCollectionView = inCollectionView,
+                    onMoveToCollection = onMoveToCollection,
+                    onNewCollection = onNewCollection,
+                    onMoveUp = onMoveUp,
+                    onMoveDown = onMoveDown,
+                    onRename = onRename,
+                    onDelete = onDelete,
+                )
+            }
+        }
+        Text(
+            book.title,
+            style = MaterialTheme.typography.titleSmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        Text("${book.totalChapters} 章", style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -505,6 +822,20 @@ private fun PlayerScreen(viewModel: MainViewModel) {
             TextButton(onClick = { catalogDialog = true }) {
                 Text("${chapter!!.chapterIndex + 1}/${chapters.size}  ${chapter!!.title}", maxLines = 1)
             }
+            // Whole-book progress: completed chapters plus the current chapter's fraction.
+            val totalForProgress = maxOf(chapters.size, book!!.totalChapters)
+            val wholeBookProgress = if (totalForProgress > 0) {
+                ((chapter!!.chapterIndex + draggedChapterProgress).coerceIn(0f, totalForProgress.toFloat())) / totalForProgress
+            } else 0f
+            Text(
+                "全书进度 ${(wholeBookProgress * 100).toInt()}%",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            LinearProgressIndicator(
+                progress = { wholeBookProgress },
+                modifier = Modifier.fillMaxWidth().padding(top = 2.dp).height(3.dp),
+            )
         }
         LazyColumn(
             state = listState,
@@ -648,6 +979,8 @@ private fun PlayerScreen(viewModel: MainViewModel) {
                     onRemoveFixedField = { batchRemoveFixed = true; batchFixedText = "" },
                     onTrimFront = { batchTrimMode = "front"; batchTrimCount = ""; batchTrimDialog = true },
                     onTrimBack = { batchTrimMode = "back"; batchTrimCount = ""; batchTrimDialog = true },
+                    onResetChapter = { viewModel.resetChapterTitle(it) },
+                    onResetAll = { viewModel.resetAllChapterTitles() },
                 )
             } else {
                 LazyColumn(Modifier.height(440.dp)) {
@@ -946,7 +1279,10 @@ private fun CatalogEditContent(
     onRemoveFixedField: () -> Unit,
     onTrimFront: () -> Unit,
     onTrimBack: () -> Unit,
+    onResetChapter: (Int) -> Unit,
+    onResetAll: () -> Unit,
 ) {
+    val anyRestorable = chapters.any { it.defaultTitle.isNotBlank() && it.defaultTitle != it.title }
     Column {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = onRemoveFixedField, modifier = Modifier.weight(1f)) {
@@ -959,14 +1295,21 @@ private fun CatalogEditContent(
                 Text("去结尾 N 字", maxLines = 1)
             }
         }
+        if (anyRestorable) {
+            OutlinedButton(
+                onClick = onResetAll,
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            ) { Text("恢复全部默认章节名") }
+        }
         Spacer(Modifier.height(6.dp))
         Text(
-            "点击章节可单独改名；上方按钮为批量操作，会应用到全部章节。",
+            "点击章节可单独改名；修改过的章节可单独恢复默认名。批量操作会应用到全部章节。",
             style = MaterialTheme.typography.bodySmall,
         )
         Spacer(Modifier.height(6.dp))
         LazyColumn(Modifier.height(380.dp)) {
             itemsIndexed(chapters, key = { _, c -> c.chapterIndex }) { _, item ->
+                val renamed = item.defaultTitle.isNotBlank() && item.defaultTitle != item.title
                 if (renameChapterTarget == item.chapterIndex) {
                     Row(
                         Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -988,6 +1331,9 @@ private fun CatalogEditContent(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        if (renamed) {
+                            TextButton(onClick = { onResetChapter(item.chapterIndex) }) { Text("恢复") }
+                        }
                         Text("改", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
                     }
                 }

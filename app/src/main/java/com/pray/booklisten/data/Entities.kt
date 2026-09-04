@@ -1,10 +1,20 @@
 package com.pray.booklisten.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 
 enum class SourceType { TXT, EPUB, WEB }
+
+/** A user-defined shelf group ("收藏夹 / 书单") that books can be filed into. */
+@Entity(tableName = "collections", primaryKeys = ["id"])
+data class CollectionEntity(
+    val id: String,
+    val name: String,
+    val position: Int = 0,
+    val createdAt: Long = System.currentTimeMillis(),
+)
 
 @Entity(tableName = "books", primaryKeys = ["id"])
 data class BookEntity(
@@ -19,6 +29,9 @@ data class BookEntity(
     val currentBlockIndex: Int = 0,
     val currentPositionMs: Long = 0,
     val totalChapters: Int = 0,
+    val collectionId: String? = null,
+    // Manual shelf ordering within the current view; equal values fall back to updatedAt.
+    val sortOrder: Int = 0,
 )
 
 @Entity(
@@ -41,6 +54,9 @@ data class ChapterEntity(
     val content: String,
     val sourceUrl: String? = null,
     val nextUrl: String? = null,
+    // Original title as extracted from the source (catalog page / file parser); used by the
+    // "restore default chapter name" action after user renames.
+    val defaultTitle: String = "",
 )
 
 data class ParsedBook(
@@ -54,4 +70,5 @@ data class ParsedChapter(
     val content: String,
     val sourceUrl: String? = null,
     val nextUrl: String? = null,
+    val defaultTitle: String = "",
 )
