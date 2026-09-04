@@ -37,6 +37,9 @@ interface BookDao {
     @Update
     suspend fun updateBook(book: BookEntity)
 
+    @Update
+    suspend fun updateBooks(books: List<BookEntity>)
+
     @Delete
     suspend fun deleteBook(book: BookEntity)
 

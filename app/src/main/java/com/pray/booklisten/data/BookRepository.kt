@@ -77,6 +77,21 @@ class BookRepository(
     }
 
     /**
+     * Pre-fetches the bodies of the next [count] placeholder chapters starting from [fromIndex]
+     * (inclusive).  Already-downloaded chapters are skipped.  Failures are swallowed per chapter so
+     * one bad chapter (or a site hiccup) never blocks the rest of the prefetch.
+     */
+    suspend fun prefetchChapters(bookId: String, fromIndex: Int, count: Int) {
+        val chapters = dao.getChapters(bookId)
+        val targets = chapters.filter { it.chapterIndex >= fromIndex && it.content.isBlank() && it.sourceUrl != null }
+            .sortedBy { it.chapterIndex }
+            .take(count)
+        for (chapter in targets) {
+            runCatching { fetchChapterContent(bookId, chapter.chapterIndex) }
+        }
+    }
+
+    /**
      * Builds the chapter list from a catalog: every catalog entry becomes a placeholder chapter
      * (empty content), except the entry matching the currently-open chapter URL, which carries the
      * already-extracted body.  This way the book is created with a full table of contents but no
@@ -227,14 +242,21 @@ class BookRepository(
         if (index < 0) return
         val swapWith = if (up) index - 1 else index + 1
         if (swapWith !in visibleBooks.indices) return
-        val materialized = visibleBooks.mapIndexed { position, book -> book.copy(sortOrder = position) }
-            .toMutableList()
-        val a = materialized[index]
-        val b = materialized[swapWith]
-        materialized[index] = b.copy(sortOrder = index)
-        materialized[swapWith] = a.copy(sortOrder = swapWith)
-        dao.updateBook(materialized[index])
-        dao.updateBook(materialized[swapWith])
+        reorderBook(visibleBooks, bookId, swapWith)
+    }
+
+    /**
+     * Moves a book to an arbitrary target slot, rematerializing `sortOrder` for every book in the
+     * visible list so the on-screen order is fully preserved.  Used by drag-to-reorder.
+     */
+    suspend fun reorderBook(visibleBooks: List<BookEntity>, bookId: String, targetIndex: Int) {
+        val from = visibleBooks.indexOfFirst { it.id == bookId }
+        if (from < 0 || targetIndex < 0 || targetIndex >= visibleBooks.size) return
+        val reordered = visibleBooks.toMutableList()
+        val moving = reordered.removeAt(from)
+        reordered.add(targetIndex, moving)
+        val updates = reordered.mapIndexed { position, book -> book.copy(sortOrder = position) }
+        dao.updateBooks(updates)
     }
 
     suspend fun cleanStoredWebBook(bookId: String) = withContext(Dispatchers.IO) {

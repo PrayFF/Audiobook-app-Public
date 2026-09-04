@@ -14,6 +14,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -66,7 +67,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -171,6 +174,9 @@ private fun LibraryScreen(
     var renameCollectionTarget by remember { mutableStateOf<CollectionEntity?>(null) }
     var renameCollectionText by rememberSaveable { mutableStateOf("") }
     var deleteCollectionTarget by remember { mutableStateOf<CollectionEntity?>(null) }
+    var draggingBookId by remember { mutableStateOf<String?>(null) }
+    var dragInsertIndex by remember { mutableStateOf<Int?>(null) }
+    val context = LocalContext.current
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importFile)
     }
@@ -181,7 +187,8 @@ private fun LibraryScreen(
     }
 
     Column(Modifier.fillMaxSize()) {
-        // Collection filter chips + layout toggle.
+        // Collection filter chips + layout toggle.  The "管理" chip stays pinned to the right so
+        // creating a new collection never shifts it (it lives outside the scrolling chip row).
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -202,12 +209,8 @@ private fun LibraryScreen(
                         label = { Text(collection.name, maxLines = 1) },
                     )
                 }
-                FilterChip(
-                    selected = false,
-                    onClick = { manageCollections = true },
-                    label = { Text("管理") },
-                )
             }
+            TextButton(onClick = { manageCollections = true }) { Text("管理") }
             TextButton(onClick = { viewModel.setLibraryLayout(grid = !grid) }) {
                 Text(if (grid) "列表" else "九宫格")
             }
@@ -261,11 +264,19 @@ private fun LibraryScreen(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp, 8.dp, 12.dp, 96.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    items(visibleBooks, key = { it.id }) { book ->
+                    itemsIndexed(visibleBooks, key = { _, book -> book.id }) { index, book ->
+                        // Insertion indicator line shown above an item while dragging over it.
+                        if (dragInsertIndex == index && draggingBookId != null) {
+                            Box(
+                                Modifier.fillMaxWidth().height(3.dp)
+                                    .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(2.dp)),
+                            )
+                        }
                         BookCard(
                             book = book,
                             collections = collections,
                             inCollectionView = selectedCollection != null,
+                            isDragging = draggingBookId == book.id,
                             onOpen = { onOpenBook(book) },
                             onRename = { renameTarget = book; renameText = book.title },
                             onDelete = { deleteTarget = book },
@@ -273,7 +284,34 @@ private fun LibraryScreen(
                             onNewCollection = { newCollectionDialog = true },
                             onMoveUp = { viewModel.moveBook(visibleBooks, book.id, up = true) },
                             onMoveDown = { viewModel.moveBook(visibleBooks, book.id, up = false) },
+                            onDragStart = { draggingBookId = book.id },
+                            onDrag = { accumulatedPx ->
+                                // Convert accumulated vertical drag (px) into a target slot index.
+                                val slotPx = (88 * context.resources.displayMetrics.density).toInt()
+                                val target = (index + accumulatedPx / slotPx)
+                                    .coerceIn(0, visibleBooks.size)
+                                dragInsertIndex = target
+                            },
+                            onDragEnd = { accumulatedPx ->
+                                val slotPx = (88 * context.resources.displayMetrics.density).toInt()
+                                val target = if (accumulatedPx == null) null
+                                else (index + accumulatedPx / slotPx).coerceIn(0, visibleBooks.size)
+                                if (target != null && target != index && target != index + 1) {
+                                    viewModel.reorderBook(visibleBooks, book.id, target)
+                                }
+                                draggingBookId = null
+                                dragInsertIndex = null
+                            },
                         )
+                    }
+                    // Allow dropping after the last item.
+                    item {
+                        if (dragInsertIndex == visibleBooks.size && draggingBookId != null) {
+                            Box(
+                                Modifier.fillMaxWidth().height(3.dp)
+                                    .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(2.dp)),
+                            )
+                        }
                     }
                 }
             }
@@ -493,6 +531,7 @@ private fun BookCard(
     book: BookEntity,
     collections: List<CollectionEntity>,
     inCollectionView: Boolean,
+    isDragging: Boolean = false,
     onOpen: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
@@ -500,12 +539,18 @@ private fun BookCard(
     onNewCollection: () -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
+    onDragStart: () -> Unit,
+    onDrag: (Int) -> Unit,
+    onDragEnd: (Int?) -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    var accumulatedDragY by remember { mutableStateOf(0f) }
+
     Row(
         Modifier.fillMaxWidth()
             .background(MaterialTheme.colorScheme.surfaceContainer, RoundedCornerShape(18.dp))
             .clickable(onClick = onOpen)
+            .then(if (isDragging) Modifier.shadow(8.dp, RoundedCornerShape(18.dp)) else Modifier)
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -534,6 +579,33 @@ private fun BookCard(
             )
         }
     }
+
+    // A thin drag handle along the bottom edge; long-pressing it for ~1s enables vertical drag.
+    Box(
+        Modifier.fillMaxWidth()
+            .height(6.dp)
+            .pointerInput(book.id) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { offset ->
+                        accumulatedDragY = 0f
+                        onDragStart()
+                    },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        accumulatedDragY += dragAmount.y
+                        onDrag(accumulatedDragY.toInt())
+                    },
+                    onDragEnd = {
+                        onDragEnd(accumulatedDragY.toInt())
+                        accumulatedDragY = 0f
+                    },
+                    onDragCancel = {
+                        onDragEnd(null)
+                        accumulatedDragY = 0f
+                    },
+                )
+            },
+    )
 }
 
 @Composable
@@ -684,6 +756,9 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
                                 val decoded = JSONTokener(result).nextValue() as? String ?: result
                                 val json = JSONObject(decoded)
                                 val content = json.optString("content").trim()
+                                if (json.optBoolean("challenge")) {
+                                    error("该站点正在做人机验证，请等待页面完全加载后再点“提取当前正文”，或换用其他站点")
+                                }
                                 require(content.length >= 80) { "当前页面没有识别到足够的正文" }
                                 val chapterTitle = json.optString("title").ifBlank { "网页章节" }
                                 val candidates = json.optJSONArray("bookTitleCandidates")?.let { array ->
@@ -741,7 +816,13 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
                             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                                 if (request?.isForMainFrame == true) {
                                     pageLoading = false
-                                    viewModel.showMessage("网页打开失败：${error?.description ?: "请检查网址和网络"}")
+                                    val hint = when (error?.errorCode) {
+                                        WebViewClient.ERROR_HOST_LOOKUP -> "域名解析失败，该站点可能已被屏蔽或域名失效"
+                                        WebViewClient.ERROR_CONNECT -> "无法连接服务器，站点可能屏蔽了应用访问或网络受限"
+                                        WebViewClient.ERROR_TIMEOUT -> "连接超时，请检查网络后重试"
+                                        else -> error?.description?.toString() ?: "请检查网址和网络"
+                                    }
+                                    viewModel.showMessage("网页打开失败：$hint")
                                 }
                             }
                         }
@@ -1132,7 +1213,12 @@ private fun PlayerScreen(viewModel: MainViewModel) {
                     ) {
                         Column(Modifier.weight(1f)) {
                             Text(state.option.label)
-                            Text("约 ${state.option.sizeMb} MB", style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                if (state.option.speedHint.isNotBlank())
+                                    "${state.option.speedHint} · 约 ${state.option.sizeMb} MB"
+                                else "约 ${state.option.sizeMb} MB",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
                         }
                         TextButton(
                             enabled = !anyDownloading,
@@ -1389,13 +1475,17 @@ private const val EXTRACT_SCRIPT = """
     return t && /^(章节目录|目录|目錄|全文目录|章节列表|全部章节|章节目录列表|小说目录|作品目录)$/.test(t);
   });
   try { if (catalogLink && new URL(catalogLink.href).host === location.host) catalogUrl = catalogLink.href; } catch (_) {}
+  // Detect Cloudflare-style human-verification interstitial so the caller can give a clear hint.
+  const challenge = /just a moment|attention required|verify you are human|challenge-platform|cf-challenge/i
+    .test(document.title + ' ' + (document.body ? document.body.innerText.slice(0, 500) : ''));
   return JSON.stringify({
     title: (document.querySelector('h1')?.innerText || document.title || '').trim(),
     documentTitle: (document.title || '').trim(),
     bookTitleCandidates,
     content,
     nextUrl,
-    catalogUrl
+    catalogUrl,
+    challenge
   });
 })()
 """

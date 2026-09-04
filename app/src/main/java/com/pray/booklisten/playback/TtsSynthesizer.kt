@@ -17,6 +17,10 @@ class TtsSynthesizer(context: Context, enginePackage: String = "") {
     private val selectedEngine = enginePackage
     private var ready = CompletableDeferred<Boolean>()
     private var tts: TextToSpeech? = null
+    // Remember the currently applied voice so we only touch engine.voice when it actually
+    // changes — some engines (Sherpa multi-speaker models) reload the whole model on a voice
+    // switch, which is slow.  Re-assigning the same voice on every block wastes seconds.
+    private var appliedVoiceName: String? = null
 
     suspend fun synthesize(text: String, output: File, voiceName: String): File {
         output.parentFile?.mkdirs()
@@ -28,8 +32,9 @@ class TtsSynthesizer(context: Context, enginePackage: String = "") {
         check(ready.await()) { "语音引擎初始化失败，请安装并启用所选音色" }
         val engine = checkNotNull(tts)
         engine.language = Locale.SIMPLIFIED_CHINESE
-        if (voiceName.isNotBlank()) {
+        if (voiceName.isNotBlank() && voiceName != appliedVoiceName) {
             engine.voices?.firstOrNull { it.name == voiceName }?.let { engine.voice = it }
+            appliedVoiceName = voiceName
         }
         val utteranceId = output.nameWithoutExtension
         return suspendCancellableCoroutine { continuation ->

@@ -134,7 +134,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun showMessage(value: String) { _message.value = value }
 
     fun importWebPage(page: ExtractedWebPage, onDone: (String) -> Unit = {}) = launchBusy("网页正文已加入书架") {
-        repository.importWebPage(page).also(onDone)
+        val bookId = repository.importWebPage(page)
+        onDone(bookId)
+        // Pre-fetch the next 10 chapters so reading isn't interrupted by on-demand downloads.
+        viewModelScope.launch { repository.prefetchChapters(bookId, fromIndex = 0, count = 10) }
     }
 
     fun openBook(book: BookEntity, chapterIndex: Int = book.currentChapterIndex) {
@@ -161,6 +164,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     } ?: return@launch
             }
             _selectedChapter.value = chapter
+            // Keep a sliding window of ~10 downloaded chapters ahead so tapping the next chapter
+            // is instant instead of downloading on demand.
+            if (book.sourceType == SourceType.WEB) {
+                viewModelScope.launch { repository.prefetchChapters(book.id, index + 1, count = 10) }
+            }
             if (autoPlay) playChapter(book, chapter, 0, 0)
         }
     }
@@ -554,6 +562,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { repository.moveBook(visibleBooks, bookId, up) }
     }
 
+    fun reorderBook(visibleBooks: List<BookEntity>, bookId: String, targetIndex: Int) {
+        viewModelScope.launch { repository.reorderBook(visibleBooks, bookId, targetIndex) }
+    }
+
     fun renameBook(book: BookEntity, newTitle: String) = launchBusy("书名已更新") {
         repository.renameBook(book.id, newTitle)
         if (_selectedBook.value?.id == book.id) {
@@ -628,6 +640,10 @@ data class VoicePackOption(
     // Distinctive fragment of the model's asset folder inside the engine APK,
     // used to detect which pack is currently installed.
     val assetKey: String,
+    // Rough synthesis speed hint shown in the UI; fast models (matcha/piper) load and
+    // synthesize several times quicker than the larger VITS models, which matters when
+    // seeking between blocks or switching voices.
+    val speedHint: String = "",
 )
 
 data class VoicePackUiState(
@@ -643,48 +659,58 @@ data class VoicePackDownload(val model: String, val percent: Int)
 
 // Curated Chinese voice packs.  All of them are verified to exist on the
 // hf-mirror.com release CDN for every supported ABI at sherpa-onnx 1.13.3.
+// They are ordered fast-first: matcha/piper models load and synthesize ~4x
+// quicker than the larger VITS models, which directly reduces the lag the
+// user feels when seeking or switching voices.
 val VOICE_PACK_OPTIONS = listOf(
+    VoicePackOption(
+        model = "matcha-icefall-zh-baker",
+        label = "中文女声 · baker（推荐 · 最快）",
+        sizeMb = 138,
+        assetKey = "baker",
+        speedHint = "加载与合成最快，适合追求顺畅体验",
+    ),
+    VoicePackOption(
+        model = "vits-piper-zh_CN-huayan-medium",
+        label = "中文女声 · huayan（快速）",
+        sizeMb = 83,
+        assetKey = "huayan",
+        speedHint = "加载快，体积较小",
+    ),
+    VoicePackOption(
+        model = "vits-piper-zh_CN-chaowen-medium",
+        label = "中文男声 · chaowen（快速）",
+        sizeMb = 75,
+        assetKey = "chaowen",
+        speedHint = "加载快，体积最小",
+    ),
+    VoicePackOption(
+        model = "vits-icefall-zh-aishell3",
+        label = "中文多说话人 · aishell3",
+        sizeMb = 50,
+        assetKey = "aishell3",
+        speedHint = "最省空间，多说话人",
+    ),
     VoicePackOption(
         model = "vits-zh-hf-fanchen-wnj",
         label = "中文男声（单说话人）",
         sizeMb = 131,
         assetKey = "fanchen",
+        speedHint = "音色稳定，加载较慢",
     ),
     VoicePackOption(
         model = "sherpa-onnx-vits-zh-ll",
         label = "中文女声 · 多说话人（5 种）",
         sizeMb = 130,
         assetKey = "vits-zh-ll",
-    ),
-    VoicePackOption(
-        model = "vits-piper-zh_CN-huayan-medium",
-        label = "中文女声 · huayan",
-        sizeMb = 83,
-        assetKey = "huayan",
-    ),
-    VoicePackOption(
-        model = "vits-piper-zh_CN-chaowen-medium",
-        label = "中文男声 · chaowen",
-        sizeMb = 75,
-        assetKey = "chaowen",
-    ),
-    VoicePackOption(
-        model = "vits-icefall-zh-aishell3",
-        label = "中文多说话人 · aishell3（最省空间）",
-        sizeMb = 50,
-        assetKey = "aishell3",
+        speedHint = "5 种音色，加载较慢",
     ),
     VoicePackOption(
         model = "vits-melo-tts-zh_en",
         label = "中英双语 · 多说话人",
         sizeMb = 176,
         assetKey = "melo-tts",
-    ),
-    VoicePackOption(
-        model = "matcha-icefall-zh-baker",
-        label = "中文女声 · baker（matcha）",
-        sizeMb = 138,
-        assetKey = "baker",
+        speedHint = "中英混合朗读，加载最慢",
     ),
 )
 
