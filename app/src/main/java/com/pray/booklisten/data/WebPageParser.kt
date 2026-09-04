@@ -12,6 +12,7 @@ data class ExtractedWebPage(
     val url: String,
     val nextUrl: String?,
     val bookTitle: String = title,
+    val catalogUrl: String? = null,
 )
 
 object WebPageParser {

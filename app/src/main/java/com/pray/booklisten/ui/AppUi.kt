@@ -383,6 +383,7 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
                                         candidates = candidates,
                                         url = currentUrl,
                                     ),
+                                    catalogUrl = json.optString("catalogUrl").takeIf { it.startsWith("https://") },
                                 )
                             }.onSuccess { page ->
                                 viewModel.importWebPage(page) { onImported() }
@@ -456,7 +457,15 @@ private fun PlayerScreen(viewModel: MainViewModel) {
         else -> -1
     }
     val listState = rememberLazyListState()
-    var chapterMenu by remember { mutableStateOf(false) }
+    var catalogDialog by remember { mutableStateOf(false) }
+    var editingCatalog by remember { mutableStateOf(false) }
+    var renameChapterTarget by remember { mutableStateOf<Int?>(null) }
+    var renameChapterText by remember { mutableStateOf("") }
+    var batchRemoveFixed by remember { mutableStateOf(false) }
+    var batchFixedText by remember { mutableStateOf("") }
+    var batchTrimDialog by remember { mutableStateOf(false) }
+    var batchTrimMode by remember { mutableStateOf("front") }
+    var batchTrimCount by remember { mutableStateOf("") }
     var speedMenu by remember { mutableStateOf(false) }
     var timerMenu by remember { mutableStateOf(false) }
     var voiceDialog by remember { mutableStateOf(false) }
@@ -493,18 +502,8 @@ private fun PlayerScreen(viewModel: MainViewModel) {
     Column(Modifier.fillMaxSize()) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
             Text(book!!.title, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Box {
-                TextButton(onClick = { chapterMenu = true }) {
-                    Text("${chapter!!.chapterIndex + 1}/${chapters.size}  ${chapter!!.title}", maxLines = 1)
-                }
-                DropdownMenu(expanded = chapterMenu, onDismissRequest = { chapterMenu = false }) {
-                    chapters.forEach { item ->
-                        DropdownMenuItem(
-                            text = { Text(item.title, maxLines = 1) },
-                            onClick = { chapterMenu = false; viewModel.selectChapter(item.chapterIndex) },
-                        )
-                    }
-                }
+            TextButton(onClick = { catalogDialog = true }) {
+                Text("${chapter!!.chapterIndex + 1}/${chapters.size}  ${chapter!!.title}", maxLines = 1)
             }
         }
         LazyColumn(
@@ -616,6 +615,158 @@ private fun PlayerScreen(viewModel: MainViewModel) {
                 }
             }
         }
+    }
+
+    if (catalogDialog) AlertDialog(
+        onDismissRequest = { catalogDialog = false; editingCatalog = false },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("目录（${chapters.size} 章）", modifier = Modifier.weight(1f))
+                TextButton(onClick = {
+                    if (editingCatalog) {
+                        editingCatalog = false
+                    } else {
+                        editingCatalog = true
+                        renameChapterTarget = null
+                    }
+                }) { Text(if (editingCatalog) "完成" else "编辑") }
+            }
+        },
+        text = {
+            if (editingCatalog) {
+                CatalogEditContent(
+                    chapters = chapters,
+                    renameChapterTarget = renameChapterTarget,
+                    renameChapterText = renameChapterText,
+                    onRenameTarget = { renameChapterTarget = it; renameChapterText = chapters.getOrNull(it)?.title.orEmpty() },
+                    onRenameText = { renameChapterText = it },
+                    onSaveRename = {
+                        renameChapterTarget?.let { viewModel.renameChapter(it, renameChapterText) }
+                        renameChapterTarget = null
+                    },
+                    onCancelRename = { renameChapterTarget = null },
+                    onRemoveFixedField = { batchRemoveFixed = true; batchFixedText = "" },
+                    onTrimFront = { batchTrimMode = "front"; batchTrimCount = ""; batchTrimDialog = true },
+                    onTrimBack = { batchTrimMode = "back"; batchTrimCount = ""; batchTrimDialog = true },
+                )
+            } else {
+                LazyColumn(Modifier.height(440.dp)) {
+                    itemsIndexed(chapters, key = { _, c -> c.chapterIndex }) { _, item ->
+                        val downloaded = item.content.isNotBlank()
+                        Row(
+                            Modifier.fillMaxWidth().clickable {
+                                catalogDialog = false
+                                viewModel.selectChapter(item.chapterIndex)
+                            }.padding(vertical = 10.dp, horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                if (item.chapterIndex == chapter!!.chapterIndex) "▶ " else "   ",
+                                color = MaterialTheme.colorScheme.primary,
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (!downloaded) {
+                                    Text("未下载，点击后加载", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { catalogDialog = false; editingCatalog = false }) { Text("关闭") } },
+    )
+
+    if (batchRemoveFixed) {
+        val sample = chapters.firstOrNull()?.title.orEmpty()
+        AlertDialog(
+            onDismissRequest = { batchRemoveFixed = false },
+            title = { Text("批量去掉固定字段") },
+            text = {
+                Column {
+                    Text(
+                        "输入章节名里重复出现的固定文字（例如书名《XX》或“第XX章”），会从所有章节名里去掉，保留剩余标题。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = batchFixedText,
+                        onValueChange = { batchFixedText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("要删除的固定文字") },
+                        placeholder = { Text("例如：重生之都市修仙") },
+                    )
+                    if (batchFixedText.isNotBlank()) {
+                        Text(
+                            "示例：${sample} → ${sample.replace(batchFixedText, "").ifBlank { "（空）" }}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = batchFixedText.isNotBlank(),
+                    onClick = {
+                        val fixed = batchFixedText
+                        val map = chapters.associate { c ->
+                            c.chapterIndex to c.title.replace(fixed, "").trim()
+                        }.filterValues { it.isNotEmpty() }
+                        viewModel.renameChapters(map)
+                        batchRemoveFixed = false
+                    },
+                ) { Text("应用") }
+            },
+            dismissButton = { TextButton(onClick = { batchRemoveFixed = false }) { Text("取消") } },
+        )
+    }
+
+    if (batchTrimDialog) {
+        val count = batchTrimCount.trim().toIntOrNull()
+        val valid = count != null && count > 0
+        val sample = chapters.firstOrNull()?.title.orEmpty()
+        val preview = if (valid) {
+            if (batchTrimMode == "front") sample.drop(count).ifBlank { "（空）" }
+            else sample.dropLast(count).ifBlank { "（空）" }
+        } else ""
+        AlertDialog(
+            onDismissRequest = { batchTrimDialog = false },
+            title = { Text(if (batchTrimMode == "front") "批量去掉开头 N 字" else "批量去掉结尾 N 字") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = batchTrimCount,
+                        onValueChange = { batchTrimCount = it.filter(Char::isDigit).take(3) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("字数") },
+                        placeholder = { Text("例如 5") },
+                        supportingText = { Text("对每个章节名去掉开头/结尾这么多字") },
+                    )
+                    if (preview.isNotEmpty()) {
+                        Text("示例：${sample} → $preview", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = valid,
+                    onClick = {
+                        val n = count!!
+                        val map = chapters.associate { c ->
+                            val t = if (batchTrimMode == "front") c.title.drop(n) else c.title.dropLast(n)
+                            c.chapterIndex to t.trim()
+                        }.filterValues { it.isNotEmpty() }
+                        viewModel.renameChapters(map)
+                        batchTrimDialog = false
+                    },
+                ) { Text("应用") }
+            },
+            dismissButton = { TextButton(onClick = { batchTrimDialog = false }) { Text("取消") } },
+        )
     }
 
     if (voiceDialog) AlertDialog(
@@ -783,6 +934,68 @@ private fun PlayerScreen(viewModel: MainViewModel) {
     }
 }
 
+@Composable
+private fun CatalogEditContent(
+    chapters: List<com.pray.booklisten.data.ChapterEntity>,
+    renameChapterTarget: Int?,
+    renameChapterText: String,
+    onRenameTarget: (Int) -> Unit,
+    onRenameText: (String) -> Unit,
+    onSaveRename: () -> Unit,
+    onCancelRename: () -> Unit,
+    onRemoveFixedField: () -> Unit,
+    onTrimFront: () -> Unit,
+    onTrimBack: () -> Unit,
+) {
+    Column {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onRemoveFixedField, modifier = Modifier.weight(1f)) {
+                Text("去固定字段", maxLines = 1)
+            }
+            OutlinedButton(onClick = onTrimFront, modifier = Modifier.weight(1f)) {
+                Text("去开头 N 字", maxLines = 1)
+            }
+            OutlinedButton(onClick = onTrimBack, modifier = Modifier.weight(1f)) {
+                Text("去结尾 N 字", maxLines = 1)
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "点击章节可单独改名；上方按钮为批量操作，会应用到全部章节。",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(Modifier.height(6.dp))
+        LazyColumn(Modifier.height(380.dp)) {
+            itemsIndexed(chapters, key = { _, c -> c.chapterIndex }) { _, item ->
+                if (renameChapterTarget == item.chapterIndex) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedTextField(
+                            value = renameChapterText,
+                            onValueChange = { if (it.length <= 120) onRenameText(it) },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                        )
+                        TextButton(onClick = onSaveRename, enabled = renameChapterText.isNotBlank()) { Text("保存") }
+                        TextButton(onClick = onCancelRename) { Text("取消") }
+                    }
+                } else {
+                    Row(
+                        Modifier.fillMaxWidth().clickable { onRenameTarget(item.chapterIndex) }
+                            .padding(vertical = 10.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(item.title, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        Text("改", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+    }
+}
+
 private const val EXTRACT_SCRIPT = """
 (() => {
   const bad = 'script,style,noscript,iframe,form,nav,footer,header,aside';
@@ -823,12 +1036,20 @@ private const val EXTRACT_SCRIPT = """
   });
   let nextUrl = '';
   try { if (next && new URL(next.href).host === location.host) nextUrl = next.href; } catch (_) {}
+  let catalogUrl = '';
+  const catalogLinks = Array.from(document.querySelectorAll('a[href]'));
+  const catalogLink = catalogLinks.find(a => {
+    const t = (a.innerText || a.textContent || '').trim();
+    return t && /^(章节目录|目录|目錄|全文目录|章节列表|全部章节|章节目录列表|小说目录|作品目录)$/.test(t);
+  });
+  try { if (catalogLink && new URL(catalogLink.href).host === location.host) catalogUrl = catalogLink.href; } catch (_) {}
   return JSON.stringify({
     title: (document.querySelector('h1')?.innerText || document.title || '').trim(),
     documentTitle: (document.title || '').trim(),
     bookTitleCandidates,
     content,
-    nextUrl
+    nextUrl,
+    catalogUrl
   });
 })()
 """

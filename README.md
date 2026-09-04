@@ -1,6 +1,6 @@
 # 听书（BookListen）
 
-当前版本：`1.0.0-alpha17`。
+当前版本：`1.0.0-alpha18`。
 
 一款无广告、无账号、无分析追踪的私人 Android 听书应用。书籍、网页正文、朗读缓存和播放进度全部保存在手机本地。
 
@@ -26,13 +26,13 @@ app/
   src/test/        本地单元测试
   schemas/         Room 数据库 Schema
 gradle/wrapper/    Gradle Wrapper
-booklisten-alpha17.apk  当前推荐安装包
+booklisten-alpha18.apk  当前推荐安装包
 booklisten-alpha14.apk  整章进度条与语音包下载基线版本安装包
 ```
 
 ## 安装包
 
-- `booklisten-alpha17.apk`：当前版本，建议覆盖安装以保留书架和播放进度。
+- `booklisten-alpha18.apk`：当前版本，建议覆盖安装以保留书架和播放进度。
 - `booklisten-alpha14.apk`：历史基线版本，仅用于回退对照。
 
 ## 安全与边界

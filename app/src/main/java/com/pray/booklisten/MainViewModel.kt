@@ -148,7 +148,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectChapter(index: Int, autoPlay: Boolean = true) {
         val book = _selectedBook.value ?: return
         viewModelScope.launch {
-            val chapter = repository.getChapter(book.id, index) ?: return@launch
+            var chapter = repository.getChapter(book.id, index) ?: return@launch
+            // A placeholder chapter (no body yet) needs to be fetched on demand before playback.
+            if (chapter.content.isBlank() && chapter.sourceUrl != null) {
+                _playbackPreparing.value = true
+                _message.value = "正在下载《${chapter.title}》正文…"
+                chapter = runCatching { repository.fetchChapterContent(book.id, index) }
+                    .getOrElse {
+                        _playbackPreparing.value = false
+                        _message.value = it.message ?: "章节正文下载失败"
+                        return@launch
+                    } ?: return@launch
+            }
             _selectedChapter.value = chapter
             if (autoPlay) playChapter(book, chapter, 0, 0)
         }
@@ -519,6 +530,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_selectedBook.value?.id == book.id) {
             _selectedBook.value = book.copy(title = newTitle.trim())
         }
+    }
+
+    fun renameChapter(chapterIndex: Int, newTitle: String) = launchBusy("章节名已更新") {
+        val book = _selectedBook.value ?: return@launchBusy
+        repository.renameChapter(book.id, chapterIndex, newTitle)
+        _selectedChapter.value = _selectedChapter.value?.takeIf { it.chapterIndex == chapterIndex }
+            ?.copy(title = newTitle.trim())
+    }
+
+    fun renameChapters(titles: Map<Int, String>) = launchBusy("章节名已批量更新") {
+        val book = _selectedBook.value ?: return@launchBusy
+        repository.renameChapters(book.id, titles)
     }
 
     private fun downloadFailureReason(reason: Int): String = when (reason) {
