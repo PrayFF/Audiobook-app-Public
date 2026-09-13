@@ -672,10 +672,12 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
     var webView by remember { mutableStateOf<WebView?>(null) }
     var extracting by remember { mutableStateOf(false) }
     var pageLoading by remember { mutableStateOf(false) }
+    var retryCount by remember { mutableStateOf(0) }
+    var navigationId by remember { mutableStateOf(0) }
     val context = LocalContext.current
 
     fun normalizedInput(): String? {
-        val raw = input.trim()
+        val raw = input.trim().trimEnd('，', '。', '；', '、', '）', '》')
         if (raw.isEmpty()) {
             viewModel.showMessage("请先输入书名或粘贴网页地址")
             return null
@@ -694,6 +696,8 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
 
     fun openInput() {
         val target = normalizedInput() ?: return
+        navigationId++
+        retryCount = 0
         requestedUrl = target
         currentUrl = target
         webView?.loadUrl(target)
@@ -736,6 +740,7 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = ::openInput, modifier = Modifier.weight(1f)) { Text("打开网址") }
                     OutlinedButton(onClick = {
+                        navigationId++
                         webView?.stopLoading()
                         webView?.destroy()
                         webView = null
@@ -755,30 +760,9 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
                             runCatching {
                                 val decoded = JSONTokener(result).nextValue() as? String ?: result
                                 val json = JSONObject(decoded)
-                                val content = json.optString("content").trim()
-                                if (json.optBoolean("challenge")) {
-                                    error("该站点正在做人机验证，请等待页面完全加载后再点“提取当前正文”，或换用其他站点")
-                                }
-                                require(content.length >= 80) { "当前页面没有识别到足够的正文" }
-                                val chapterTitle = json.optString("title").ifBlank { "网页章节" }
-                                val candidates = json.optJSONArray("bookTitleCandidates")?.let { array ->
-                                    List(array.length()) { array.optString(it) }
-                                }.orEmpty()
-                                ExtractedWebPage(
-                                    title = chapterTitle,
-                                    content = content,
-                                    url = currentUrl,
-                                    nextUrl = json.optString("nextUrl").takeIf { it.startsWith("https://") },
-                                    bookTitle = WebBookTitleResolver.resolve(
-                                        chapterTitle = chapterTitle,
-                                        documentTitle = json.optString("documentTitle"),
-                                        candidates = candidates,
-                                        url = currentUrl,
-                                    ),
-                                    catalogUrl = json.optString("catalogUrl").takeIf { it.startsWith("https://") },
-                                )
-                            }.onSuccess { page ->
-                                viewModel.importWebPage(page) { onImported() }
+                                json.getString("html")
+                            }.onSuccess { html ->
+                                viewModel.importBrowserHtml(html, currentUrl, onImported)
                             }.onFailure {
                                 viewModel.showMessage(it.message ?: "正文提取失败，请确认当前打开的是正文页面")
                             }
@@ -786,7 +770,8 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text(if (extracting) "正在提取…" else "提取当前正文并加入书架") }
+                ) { Text(if (extracting) "正在提取…" else "导入当前目录或正文") }
+                Text("如出现人机验证，请在下方网页手动勾选。", style = MaterialTheme.typography.bodySmall)
                 Text(
                     if (pageLoading) "网页加载中…" else "当前页面：$currentUrl",
                     style = MaterialTheme.typography.bodySmall,
@@ -816,9 +801,19 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
                             override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                                 if (request?.isForMainFrame == true) {
                                     pageLoading = false
+                                    if (error?.errorCode in listOf(WebViewClient.ERROR_CONNECT, WebViewClient.ERROR_TIMEOUT) && retryCount < 2) {
+                                        retryCount++
+                                        val generation = navigationId
+                                        val failedUrl = request.url.toString()
+                                        viewModel.showMessage("连接暂时失败，稍后重试（$retryCount/2）")
+                                        view?.postDelayed({
+                                            if (generation == navigationId && webView === view && currentUrl == failedUrl) view?.loadUrl(failedUrl)
+                                        }, retryCount * 3000L)
+                                        return
+                                    }
                                     val hint = when (error?.errorCode) {
-                                        WebViewClient.ERROR_HOST_LOOKUP -> "域名解析失败，该站点可能已被屏蔽或域名失效"
-                                        WebViewClient.ERROR_CONNECT -> "连接被拒绝，很可能是域名被污染（解析到了无效地址），请尝试更换 DNS 或使用代理"
+                                        WebViewClient.ERROR_HOST_LOOKUP -> "域名解析失败，请检查网络后重新打开"
+                                        WebViewClient.ERROR_CONNECT -> "连接未建立，无法仅凭此错误判断 DNS 污染。请稍后重新打开，或切换手机网络后重试"
                                         WebViewClient.ERROR_TIMEOUT -> "连接超时，请检查网络后重试"
                                         else -> error?.description?.toString() ?: "请检查网址和网络"
                                     }
@@ -902,6 +897,13 @@ private fun PlayerScreen(viewModel: MainViewModel) {
             Text(book!!.title, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
             TextButton(onClick = { catalogDialog = true }) {
                 Text("${chapter!!.chapterIndex + 1}/${chapters.size}  ${chapter!!.title}", maxLines = 1)
+            }
+            if (book!!.sourceType == com.pray.booklisten.data.SourceType.WEB) {
+                val ahead = chapters.filter { it.chapterIndex in (chapter!!.chapterIndex + 1)..(chapter!!.chapterIndex + 10) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("后续正文缓存 ${ahead.count { it.content.isNotBlank() }}/${ahead.size} 章", style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = viewModel::retryChapterCache) { Text("补齐缓存") }
+                }
             }
             // Whole-book progress: completed chapters plus the current chapter's fraction.
             val totalForProgress = maxOf(chapters.size, book!!.totalChapters)
@@ -1430,62 +1432,16 @@ private fun CatalogEditContent(
 
 private const val EXTRACT_SCRIPT = """
 (() => {
-  const bad = 'script,style,noscript,iframe,form,nav,footer,header,aside';
-  const candidates = Array.from(document.querySelectorAll('article,main,[role=main],.content,.chapter-content,.read-content,#content,#chaptercontent'));
-  candidates.push(document.body);
-  const score = el => (el.innerText || '').length - Array.from(el.querySelectorAll('a')).reduce((n,a) => n + (a.innerText || '').length * 2, 0);
-  const root = candidates.sort((a,b) => score(b) - score(a))[0];
-  const clone = root.cloneNode(true);
-  clone.querySelectorAll(bad).forEach(el => el.remove());
-  const content = (clone.innerText || '').replace(/[ \\t]+/g, ' ').replace(/\\n{3,}/g, '\\n\\n').trim();
-  const links = Array.from(document.querySelectorAll('a[href]'));
-  const next = links.find(a => (a.rel || '').toLowerCase().includes('next')) || links.find(a => /^(下一章|下一页|下页|下一节|next|›|»)/i.test((a.innerText || '').trim()));
-  const bookTitleCandidates = [];
-  ['meta[property="og:novel:book_name"]','meta[name="book_name"]','meta[property="book:name"]'].forEach(selector => {
-    const value = document.querySelector(selector)?.content?.trim();
-    if (value) bookTitleCandidates.push(value);
-  });
-  const visitJsonLd = value => {
-    if (Array.isArray(value)) return value.forEach(visitJsonLd);
-    if (!value || typeof value !== 'object') return;
-    const types = Array.isArray(value['@type']) ? value['@type'] : [value['@type']];
-    if (types.some(type => /^(book|novel)$/i.test(type || ''))) {
-      if (value.name) bookTitleCandidates.push(String(value.name));
-      if (value.headline) bookTitleCandidates.push(String(value.headline));
+  const clone = document.documentElement.cloneNode(true);
+  const originals = document.documentElement.querySelectorAll('*');
+  const copies = clone.querySelectorAll('*');
+  originals.forEach((el, i) => {
+    // Keep metadata, but exclude hidden rendered content from the extraction snapshot only.
+    if (el.closest('body')) {
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') copies[i].remove();
     }
-    Object.values(value).forEach(visitJsonLd);
-  };
-  document.querySelectorAll('script[type="application/ld+json"]').forEach(script => {
-    try { visitJsonLd(JSON.parse(script.textContent)); } catch (_) {}
   });
-  document.querySelectorAll('#info h1,.book-info h1,.bookname,[itemprop="name"]').forEach(el => {
-    const value = (el.innerText || '').trim();
-    if (value) bookTitleCandidates.push(value);
-  });
-  Array.from(document.querySelectorAll('.breadcrumb a,.breadcrumbs a,.crumb a,.path a')).reverse().forEach(el => {
-    const value = (el.innerText || '').trim();
-    if (value) bookTitleCandidates.push(value);
-  });
-  let nextUrl = '';
-  try { if (next && new URL(next.href).host === location.host) nextUrl = next.href; } catch (_) {}
-  let catalogUrl = '';
-  const catalogLinks = Array.from(document.querySelectorAll('a[href]'));
-  const catalogLink = catalogLinks.find(a => {
-    const t = (a.innerText || a.textContent || '').trim();
-    return t && /^(章节目录|目录|目錄|全文目录|章节列表|全部章节|章节目录列表|小说目录|作品目录)$/.test(t);
-  });
-  try { if (catalogLink && new URL(catalogLink.href).host === location.host) catalogUrl = catalogLink.href; } catch (_) {}
-  // Detect Cloudflare-style human-verification interstitial so the caller can give a clear hint.
-  const challenge = /just a moment|attention required|verify you are human|challenge-platform|cf-challenge/i
-    .test(document.title + ' ' + (document.body ? document.body.innerText.slice(0, 500) : ''));
-  return JSON.stringify({
-    title: (document.querySelector('h1')?.innerText || document.title || '').trim(),
-    documentTitle: (document.title || '').trim(),
-    bookTitleCandidates,
-    content,
-    nextUrl,
-    catalogUrl,
-    challenge
-  });
+  return JSON.stringify({html: clone.outerHTML});
 })()
 """

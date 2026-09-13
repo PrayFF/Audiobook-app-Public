@@ -2,18 +2,34 @@ package com.pray.booklisten.data
 
 import android.content.Context
 import android.net.Uri
+import android.webkit.CookieManager
+import android.webkit.WebSettings
 import androidx.room.withTransaction
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.util.UUID
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.ConcurrentHashMap
 
 class BookRepository(
     private val context: Context,
     private val database: AppDatabase,
 ) {
     private val dao = database.bookDao()
+    private val chapterDownloads = ConcurrentHashMap<String, Mutex>()
+
+    fun scheduleChapterCache(bookId: String, current: Int) = WebChapterCacheWorker.schedule(context, bookId, current)
+
+    suspend fun importCatalog(title: String, url: String, catalog: List<CatalogChapter>): String {
+        require(catalog.isNotEmpty()) { "目录没有找到章节" }
+        val parsed = ParsedBook(title, chapters = catalog.mapIndexed { index, entry ->
+            ParsedChapter(entry.title, "", entry.url, catalog.getOrNull(index + 1)?.url, entry.title)
+        })
+        return saveParsedBook(parsed, SourceType.WEB, url).also { scheduleChapterCache(it, 0) }
+    }
 
     fun observeBooks(): Flow<List<BookEntity>> = dao.observeBooks()
     fun observeChapters(bookId: String): Flow<List<ChapterEntity>> = dao.observeChapters(bookId)
@@ -66,7 +82,7 @@ class BookRepository(
         // Try to fetch the full chapter catalog from the chapter page; only titles + URLs are
         // stored (no chapter body is downloaded).  If it fails, fall back to a single-chapter book
         // exactly like before.
-        val catalog = page.catalogUrl?.let { runCatching { WebCatalogParser.fetchCatalog(it) }.getOrNull() }
+        val catalog = page.catalogUrl?.let { runCatching { fetchWebCatalog(it) }.getOrNull() }
         val chapters = if (catalog.isNullOrEmpty()) {
             listOf(ParsedChapter(page.title, content, page.url, page.nextUrl, page.title))
         } else {
@@ -83,11 +99,13 @@ class BookRepository(
      */
     suspend fun prefetchChapters(bookId: String, fromIndex: Int, count: Int) {
         val chapters = dao.getChapters(bookId)
-        val targets = chapters.filter { it.chapterIndex >= fromIndex && it.content.isBlank() && it.sourceUrl != null }
+        val targets = chapters.filter { it.chapterIndex >= fromIndex && it.chapterIndex.toLong() < fromIndex.toLong() + count && it.content.isBlank() && it.sourceUrl != null }
             .sortedBy { it.chapterIndex }
             .take(count)
         for (chapter in targets) {
-            runCatching { fetchChapterContent(bookId, chapter.chapterIndex) }
+            try { fetchChapterContent(bookId, chapter.chapterIndex) }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { break }
         }
     }
 
@@ -127,11 +145,12 @@ class BookRepository(
      * Fetches a chapter's body by its stored source URL and fills it in.  Used when the user taps
      * a not-yet-downloaded chapter in the table of contents.
      */
-    suspend fun fetchChapterContent(bookId: String, chapterIndex: Int): ChapterEntity? {
-        val chapter = dao.getChapter(bookId, chapterIndex) ?: return null
-        if (chapter.content.isNotBlank()) return chapter
-        val url = chapter.sourceUrl ?: return chapter
-        val page = WebPageParser.fetch(url)
+    suspend fun fetchChapterContent(bookId: String, chapterIndex: Int): ChapterEntity? =
+        chapterDownloads.getOrPut("$bookId:$chapterIndex") { Mutex() }.withLock {
+        val chapter = dao.getChapter(bookId, chapterIndex) ?: return@withLock null
+        if (chapter.content.isNotBlank()) return@withLock chapter
+        val url = chapter.sourceUrl ?: return@withLock chapter
+        val page = fetchWebPage(url)
         val content = NovelTextCleaner.clean(page.content, page.title)
         require(content.length >= 40) { "该章节没有识别到足够正文" }
         // Keep a user-renamed title; otherwise adopt the page's own chapter heading.
@@ -140,22 +159,26 @@ class BookRepository(
         // Fill in the default title on first fetch so "restore default name" works even for
         // placeholder chapters created before this field existed.
         val defaultTitle = chapter.defaultTitle.ifBlank { page.title.ifBlank { title } }
-        val updated = chapter.copy(content = content, title = title, defaultTitle = defaultTitle)
+        val latest = dao.getChapter(bookId, chapterIndex) ?: return@withLock null
+        val updated = latest.copy(content = content, title = latest.title.ifBlank { title }, defaultTitle = defaultTitle, nextUrl = page.nextUrl ?: latest.nextUrl)
         dao.upsertChapters(listOf(updated))
-        return updated
+        updated
     }
 
     suspend fun appendNextWebChapter(bookId: String): Boolean {
         val chapters = dao.getChapters(bookId)
         val last = chapters.lastOrNull() ?: return false
-        val nextUrl = last.nextUrl ?: return false
+        val nextUrl = last.nextUrl ?: last.sourceUrl?.let { fetchWebPage(it).nextUrl } ?: return false
+        if (chapters.any { it.sourceUrl == nextUrl }) return false
         return appendByUrl(bookId, chapters.size, nextUrl)
     }
 
     private suspend fun appendByUrl(bookId: String, index: Int, url: String): Boolean {
-        val page = WebPageParser.fetch(url)
+        val page = fetchWebPage(url)
+        val content = NovelTextCleaner.clean(page.content, page.title)
+        require(content.length >= 40) { "下一章未识别到正文，请在内置浏览器打开该页检查" }
         dao.upsertChapters(
-            listOf(ChapterEntity(bookId, index, page.title, NovelTextCleaner.clean(page.content, page.title), page.url, page.nextUrl))
+            listOf(ChapterEntity(bookId, index, page.title, content, page.url, page.nextUrl))
         )
         val book = dao.getBook(bookId) ?: return true
         dao.updateBook(book.copy(totalChapters = index + 1, updatedAt = System.currentTimeMillis()))
@@ -319,4 +342,25 @@ class BookRepository(
         }
         return id
     }
+
+    /** Reuses the browser's user agent and cookies so background caching can follow a manual login/verification. */
+    private suspend fun fetchWebPage(url: String): ExtractedWebPage = WebPageParser.fetch(
+        url = url,
+        userAgent = webUserAgent(),
+        cookie = webCookie(url),
+    )
+
+    private suspend fun fetchWebCatalog(url: String): List<CatalogChapter> = WebCatalogParser.fetchCatalog(
+        url = url,
+        userAgent = webUserAgent(),
+        cookie = webCookie(url),
+    )
+
+    private fun webCookie(url: String): String? = runCatching {
+        CookieManager.getInstance().getCookie(url)
+    }.getOrNull()
+
+    private fun webUserAgent(): String = runCatching {
+        WebSettings.getDefaultUserAgent(context)
+    }.getOrDefault("Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36")
 }

@@ -128,7 +128,19 @@ class PlaybackService : MediaSessionService() {
         synthesisJob = scope.launch {
             val app = application as BookListenApplication
             val book = app.repository.getBook(bookId) ?: return@launch
-            val chapter = app.repository.getChapter(bookId, chapterIndex) ?: return@launch
+            val chapter = try {
+                if (book.sourceType == com.pray.booklisten.data.SourceType.WEB) {
+                    app.repository.scheduleChapterCache(bookId, chapterIndex)
+                    app.repository.fetchChapterContent(bookId, chapterIndex)
+                } else app.repository.getChapter(bookId, chapterIndex)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                val message = error.message ?: "章节正文下载失败"
+                PlaybackEvents.report(message)
+                showErrorNotification(message)
+                return@launch
+            } ?: return@launch
             val chunks = TextChunker.chunk(chapter.content)
             player.stop()
             player.clearMediaItems()

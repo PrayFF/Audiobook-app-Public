@@ -70,8 +70,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var voiceDownloadId: Long? = null
     private var autoSelectedNeuralEngine = false
     private var waitingForEngineSettings = false
+    private var chapterSelection = 0
 
     init {
+        viewModelScope.launch {
+            chapters.collect { updated ->
+                val selected = _selectedChapter.value
+                if (selected != null) updated.firstOrNull {
+                    it.bookId == selected.bookId && it.chapterIndex == selected.chapterIndex
+                }?.let { _selectedChapter.value = it }
+            }
+        }
         viewModelScope.launch {
             playback.state.collect { state ->
                 if (state.bookId.isNotBlank() && state.durationMs > 0) _playbackPreparing.value = false
@@ -133,25 +142,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun showMessage(value: String) { _message.value = value }
 
+    fun importBrowserHtml(html: String, url: String, onDone: () -> Unit) = launchBusy("已加入书架，正在缓存正文") {
+        val doc = org.jsoup.Jsoup.parse(html, url)
+        val isCatalog = java.net.URI(url).path.matches(Regex(".*/(?:index\\.html?|index\\.htm|)$"))
+        val bookId = if (isCatalog) {
+            val catalog = com.pray.booklisten.data.WebCatalogParser.parse(doc)
+            val title = doc.selectFirst("meta[property=og:novel:book_name]")?.attr("content")?.takeIf { it.isNotBlank() }
+                ?: doc.title().substringBefore("免费在线阅读").substringBefore('_').ifBlank {
+                    doc.selectFirst("h1,h2")?.text()?.trim().orEmpty().ifBlank { "网页书籍" }
+                }
+            repository.importCatalog(title, url, catalog)
+        } else {
+            repository.importWebPage(com.pray.booklisten.data.WebPageParser.parse(doc)).also {
+                repository.scheduleChapterCache(it, 0)
+            }
+        }
+        repository.getBook(bookId)?.let { openBook(it) }
+        onDone()
+    }
+
+    fun retryChapterCache() {
+        val book = _selectedBook.value ?: return
+        repository.scheduleChapterCache(book.id, _selectedChapter.value?.chapterIndex ?: book.currentChapterIndex)
+        _message.value = "已安排补齐后续 10 章，联网后自动执行"
+    }
+
     fun importWebPage(page: ExtractedWebPage, onDone: (String) -> Unit = {}) = launchBusy("网页正文已加入书架") {
         val bookId = repository.importWebPage(page)
         onDone(bookId)
         // Pre-fetch the next 10 chapters so reading isn't interrupted by on-demand downloads.
-        viewModelScope.launch { repository.prefetchChapters(bookId, fromIndex = 0, count = 10) }
+        repository.scheduleChapterCache(bookId, 0)
     }
 
     fun openBook(book: BookEntity, chapterIndex: Int = book.currentChapterIndex) {
+        chapterSelection++
         _selectedBook.value = book
+        _selectedChapter.value = null
         viewModelScope.launch {
             if (book.sourceType == SourceType.WEB) repository.cleanStoredWebBook(book.id)
-            _selectedChapter.value = repository.getChapter(book.id, chapterIndex)
+            selectChapter(chapterIndex, autoPlay = false)
         }
     }
 
     fun selectChapter(index: Int, autoPlay: Boolean = true) {
         val book = _selectedBook.value ?: return
+        val selection = ++chapterSelection
+        if (book.sourceType == SourceType.WEB) repository.scheduleChapterCache(book.id, index)
         viewModelScope.launch {
             var chapter = repository.getChapter(book.id, index) ?: return@launch
+            if (selection != chapterSelection) return@launch
+            _selectedChapter.value = chapter
             // A placeholder chapter (no body yet) needs to be fetched on demand before playback.
             if (chapter.content.isBlank() && chapter.sourceUrl != null) {
                 _playbackPreparing.value = true
@@ -163,12 +203,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         return@launch
                     } ?: return@launch
             }
+            _playbackPreparing.value = false
+            if (_selectedBook.value?.id != book.id || selection != chapterSelection) return@launch
             _selectedChapter.value = chapter
-            // Keep a sliding window of ~10 downloaded chapters ahead so tapping the next chapter
-            // is instant instead of downloading on demand.
-            if (book.sourceType == SourceType.WEB) {
-                viewModelScope.launch { repository.prefetchChapters(book.id, index + 1, count = 10) }
-            }
             if (autoPlay) playChapter(book, chapter, 0, 0)
         }
     }
@@ -212,12 +249,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun ensureNextWebChapter(playAfter: Boolean = false) {
         val book = _selectedBook.value ?: return
         val current = _selectedChapter.value ?: return
-        if (current.nextUrl == null || nextPageLoading) return
+        if (book.sourceType != SourceType.WEB || nextPageLoading) return
         nextPageLoading = true
         viewModelScope.launch {
             runCatching { repository.appendNextWebChapter(book.id) }
                 .onSuccess { appended ->
                     if (appended && playAfter) selectChapter(current.chapterIndex + 1)
+                    if (!appended) _message.value = "未发现新的下一章链接，可能已到末章；可在内置浏览器检查原网页"
                 }
                 .onFailure { _message.value = it.message ?: "下一页提取失败" }
             nextPageLoading = false

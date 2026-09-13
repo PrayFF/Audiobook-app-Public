@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import org.jsoup.nodes.Document
 import java.net.URI
 
 data class CatalogChapter(
@@ -28,13 +29,24 @@ object WebCatalogParser {
     )
 
     /** Fetches a catalog page and returns its chapter list in document order. */
-    suspend fun fetchCatalog(url: String): List<CatalogChapter> = withContext(Dispatchers.IO) {
+    suspend fun fetchCatalog(
+        url: String,
+        userAgent: String = DEFAULT_USER_AGENT,
+        cookie: String? = null,
+    ): List<CatalogChapter> = withContext(Dispatchers.IO) {
         require(url.startsWith("https://")) { "仅支持 HTTPS 网页" }
-        val document = Jsoup.connect(url)
-            .userAgent("Mozilla/5.0 (Android) BookListen/1.0")
+        val connection = Jsoup.connect(url)
+            .userAgent(userAgent)
             .timeout(15_000)
             .maxBodySize(4 * 1024 * 1024)
-            .get()
+        cookie?.takeIf(String::isNotBlank)?.let { connection.header("Cookie", it) }
+        val document = connection.get()
+        parse(document)
+    }
+
+    fun parse(document: Document): List<CatalogChapter> {
+        val url = document.location()
+        val document = document.clone()
         document.select("script,style,noscript,iframe,form,nav,footer,header,aside").remove()
 
         val base = runCatching { URI(url) }.getOrNull()
@@ -42,23 +54,33 @@ object WebCatalogParser {
         val seen = LinkedHashMap<String, CatalogChapter>()
         val containers = document.select("a[href]")
         // Prefer links inside a listing container; fall back to all links on the page.
-        val linkElements = pickCatalogLinks(containers)
+        val bookDirectory = base?.path?.substringBeforeLast('/')?.takeIf { it.matches(Regex("/book/[0-9]+")) }
+        val linkElements = if (bookDirectory != null) containers.toList() else pickCatalogLinks(containers)
         for (link in linkElements) {
             val title = link.text().trim()
             if (!isChapterTitle(title)) continue
             val absolute = link.absUrl("href").trim()
             if (absolute.isEmpty()) continue
-            val sameHost = runCatching { URI(absolute).host.equals(host, ignoreCase = true) }.getOrDefault(false)
+            val sameHost = runCatching {
+                val target = URI(absolute)
+                target.scheme == "https" && target.host.equals(host, ignoreCase = true) &&
+                    (bookDirectory == null || target.path.substringBeforeLast('/') == bookDirectory)
+            }.getOrDefault(false)
             if (!sameHost) continue
             if (seen.containsKey(absolute)) continue
             seen[absolute] = CatalogChapter(title, absolute)
         }
         require(seen.isNotEmpty()) { "没有在目录页找到章节，请在目录页再试一次" }
-        seen.values.toList()
+        return seen.values.toList()
     }
 
     /** Chooses the anchor container(s) most likely to hold the chapter list. */
     private fun pickCatalogLinks(links: org.jsoup.select.Elements): List<Element> {
+        val explicit = links.firstOrNull()?.ownerDocument()?.select("#dir,#list,#catalog,.catalog,.book-list,.chapter-list,dl")
+            ?.maxByOrNull { el -> el.select("a[href]").count { isChapterTitle(it.text().trim()) } }
+        if (explicit != null && explicit.select("a[href]").count { isChapterTitle(it.text().trim()) } >= 2) {
+            return explicit.select("a[href]").toList()
+        }
         val scored = links.groupBy { it.parent()?.parent() ?: it.parent() ?: it }
             .maxByOrNull { (_, group) ->
                 group.count { isChapterTitle(it.text().trim()) }
@@ -71,4 +93,8 @@ object WebCatalogParser {
         if (skipLabels.contains(title)) return false
         return chapterHeading.containsMatchIn(title)
     }
+
+    private const val DEFAULT_USER_AGENT =
+        "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 }
