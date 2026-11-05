@@ -11,13 +11,14 @@ object NovelHtmlExtractor {
         ".post-meta,.entry-meta,.article-meta,.article-info,.post-info,.chapter-header," +
         ".breadcrumbs,.breadcrumb,.post-share,.article-share,.share,.shares,.sharing,.social-share," +
         ".post-like,.article-like,.post-copyright,.post-nav,.article-nav,.related-posts,.related," +
-        ".widget,.sidebar,.reading-ad-top,.reading-ad-bottom,ins.adsbygoogle"
+        ".widget,.sidebar,.reading-ad-top,.reading-ad-bottom,ins.adsbygoogle," +
+        ".txtinfo.hide720,#txtright,.err_tips,.page1"
 
     fun extract(document: Document): String {
         val page = document.clone()
         page.select(chrome).remove()
         // Named body containers outrank a broad #content wrapper, even if the wrapper is longer.
-        val bodies = page.select("#neirong,.neirong,.bookreadercontent,.article-content,.entry-content," +
+        val bodies = page.select("#neirong,.neirong,.txtnav,.bookreadercontent,.article-content,.entry-content," +
             ".post-content,[itemprop=articleBody],.chapter-content,.read-content,#chaptercontent")
             .filter { score(it) >= 80 }
         val candidates = bodies.ifEmpty {

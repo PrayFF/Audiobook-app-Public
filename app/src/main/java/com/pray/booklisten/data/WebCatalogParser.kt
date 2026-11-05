@@ -1,6 +1,9 @@
 package com.pray.booklisten.data
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
@@ -35,13 +38,67 @@ object WebCatalogParser {
         cookie: String? = null,
     ): List<CatalogChapter> = withContext(Dispatchers.IO) {
         require(url.startsWith("https://")) { "仅支持 HTTPS 网页" }
+        val initial = fetchDocument(url, userAgent, cookie)
+        val initialUri = runCatching { URI(initial.location()) }.getOrNull()
+        if (!initialUri?.host.equals("m.hetushu.com", ignoreCase = true)) {
+            return@withContext parse(initial)
+        }
+
+        // The mobile index only contains a short preview. The complete catalog starts at
+        // catalog-1.html and is split across a <select> driven set of catalog-N.html pages.
+        val firstCatalogUrl = when {
+            initialUri?.path?.matches(Regex("/book/[0-9]+/catalog-[0-9]+\\.html")) == true -> initial.location()
+            else -> initial.select("a[href]").firstNotNullOfOrNull { link ->
+                link.absUrl("href").takeIf {
+                    runCatching { URI(it).path.matches(Regex("/book/[0-9]+/catalog-[0-9]+\\.html")) }
+                        .getOrDefault(false)
+                }
+            }
+        } ?: return@withContext parse(initial)
+
+        val firstCatalog = if (firstCatalogUrl == initial.location()) initial
+            else fetchDocument(firstCatalogUrl, userAgent, cookie)
+        val pageUrls = hetushuCatalogPageUrls(firstCatalog)
+        if (pageUrls.size <= 1) return@withContext parse(firstCatalog)
+
+        val documents = mutableListOf<Document>()
+        pageUrls.chunked(MAX_PARALLEL_CATALOG_REQUESTS).forEach { batch ->
+            documents += coroutineScope {
+                batch.map { pageUrl ->
+                    async {
+                        if (pageUrl == firstCatalog.location()) firstCatalog
+                        else fetchDocument(pageUrl, userAgent, cookie)
+                    }
+                }.awaitAll()
+            }
+        }
+        val seen = LinkedHashMap<String, CatalogChapter>()
+        documents.flatMap(::parse).forEach { chapter -> seen.putIfAbsent(chapter.url, chapter) }
+        require(seen.isNotEmpty()) { "没有在目录页找到章节，请在目录页再试一次" }
+        seen.values.toList()
+    }
+
+    private fun fetchDocument(url: String, userAgent: String, cookie: String?): Document {
         val connection = Jsoup.connect(url)
             .userAgent(userAgent)
             .timeout(15_000)
             .maxBodySize(4 * 1024 * 1024)
         cookie?.takeIf(String::isNotBlank)?.let { connection.header("Cookie", it) }
-        val document = connection.get()
-        parse(document)
+        return connection.get()
+    }
+
+    internal fun hetushuCatalogPageUrls(document: Document): List<String> {
+        val uri = runCatching { URI(document.location()) }.getOrNull() ?: return emptyList()
+        if (!uri.host.equals("m.hetushu.com", ignoreCase = true) ||
+            !uri.path.matches(Regex("/book/[0-9]+/catalog-[0-9]+\\.html"))
+        ) return emptyList()
+        val pageNumbers = document.select("select option[value]")
+            .mapNotNull { it.attr("value").trim().toIntOrNull() }
+            .filter { it in 1..MAX_CATALOG_PAGES }
+            .distinct()
+            .sorted()
+        if (pageNumbers.isEmpty()) return listOf(document.location())
+        return pageNumbers.map { page -> uri.resolve("catalog-$page.html").toString() }
     }
 
     fun parse(document: Document): List<CatalogChapter> {
@@ -55,7 +112,11 @@ object WebCatalogParser {
         val containers = document.select("a[href]")
         // Prefer links inside a listing container; fall back to all links on the page.
         val bookDirectory = base?.path?.substringBeforeLast('/')?.takeIf { it.matches(Regex("/book/[0-9]+")) }
-        val linkElements = if (bookDirectory != null) containers.toList() else pickCatalogLinks(containers)
+        val quanbenDirectory = base?.path?.substringBeforeLast('/')?.takeIf {
+            isQuanbenHost(host) && base.path.matches(Regex("/n/[^/]+/list\\.html"))
+        }
+        val requiredDirectory = bookDirectory ?: quanbenDirectory
+        val linkElements = if (requiredDirectory != null) containers.toList() else pickCatalogLinks(containers)
         for (link in linkElements) {
             val title = link.text().trim()
             if (!isChapterTitle(title)) continue
@@ -64,7 +125,7 @@ object WebCatalogParser {
             val sameHost = runCatching {
                 val target = URI(absolute)
                 target.scheme == "https" && target.host.equals(host, ignoreCase = true) &&
-                    (bookDirectory == null || target.path.substringBeforeLast('/') == bookDirectory)
+                    (requiredDirectory == null || target.path.substringBeforeLast('/') == requiredDirectory)
             }.getOrDefault(false)
             if (!sameHost) continue
             if (seen.containsKey(absolute)) continue
@@ -94,7 +155,12 @@ object WebCatalogParser {
         return chapterHeading.containsMatchIn(title)
     }
 
+    private fun isQuanbenHost(host: String): Boolean =
+        host.equals("quanben.io", ignoreCase = true) || host.endsWith(".quanben.io", ignoreCase = true)
+
     private const val DEFAULT_USER_AGENT =
         "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+    private const val MAX_PARALLEL_CATALOG_REQUESTS = 4
+    private const val MAX_CATALOG_PAGES = 100
 }

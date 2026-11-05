@@ -31,6 +31,9 @@ class BookRepository(
         return saveParsedBook(parsed, SourceType.WEB, url).also { scheduleChapterCache(it, 0) }
     }
 
+    suspend fun importCatalog(title: String, url: String): String =
+        importCatalog(title, url, fetchWebCatalog(url))
+
     fun observeBooks(): Flow<List<BookEntity>> = dao.observeBooks()
     fun observeChapters(bookId: String): Flow<List<ChapterEntity>> = dao.observeChapters(bookId)
     suspend fun getBook(id: String) = dao.getBook(id)

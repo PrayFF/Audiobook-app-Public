@@ -144,14 +144,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun importBrowserHtml(html: String, url: String, onDone: () -> Unit) = launchBusy("已加入书架，正在缓存正文") {
         val doc = org.jsoup.Jsoup.parse(html, url)
-        val isCatalog = java.net.URI(url).path.matches(Regex(".*/(?:index\\.html?|index\\.htm|)$"))
+        val isCatalog = java.net.URI(url).path.matches(
+            Regex(".*/(?:index\\.html?|index\\.htm|catalog-[0-9]+\\.html|)$")
+        )
         val bookId = if (isCatalog) {
-            val catalog = com.pray.booklisten.data.WebCatalogParser.parse(doc)
             val title = doc.selectFirst("meta[property=og:novel:book_name]")?.attr("content")?.takeIf { it.isNotBlank() }
                 ?: doc.title().substringBefore("免费在线阅读").substringBefore('_').ifBlank {
                     doc.selectFirst("h1,h2")?.text()?.trim().orEmpty().ifBlank { "网页书籍" }
                 }
-            repository.importCatalog(title, url, catalog)
+            repository.importCatalog(title, url)
         } else {
             repository.importWebPage(com.pray.booklisten.data.WebPageParser.parse(doc)).also {
                 repository.scheduleChapterCache(it, 0)

@@ -53,4 +53,16 @@ class WebPageParserTest {
     fun refusesChallengeInsteadOfImportingItAsStory() {
         WebPageParser.parse(Jsoup.parse("<title>Just a moment...</title><main>$story</main>", "https://example.com/1"))
     }
+
+    @Test fun resolvesQuanbenFullCatalogFromChapterUrl() {
+        val doc = Jsoup.parse(
+            "<h1>第1章 山边小村</h1><article><p>$story</p></article>",
+            "https://www.quanben.io/n/fanrenxiuxianzhuan/1.html",
+        )
+
+        assertEquals(
+            "https://www.quanben.io/n/fanrenxiuxianzhuan/list.html",
+            WebPageParser.parse(doc).catalogUrl,
+        )
+    }
 }

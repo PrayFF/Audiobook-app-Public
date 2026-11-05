@@ -43,11 +43,20 @@ object WebPageParser {
         }
         // Navigation and metadata must be read BEFORE removing page chrome.
         val next = findNext(document.select("a[href],link[rel=next]").toList(), url)
+        val pageUri = runCatching { URI(url) }.getOrNull()
         val catalog = document.select("a[href]").firstOrNull {
-            it.text().trim() in setOf("目录", "返回目录", "章节目录", "返回列表")
-        }?.absUrl("href") ?: if (URI(url).host == "www.hetushu.com" && URI(url).path.matches(Regex("/book/[0-9]+/[0-9]+\\.html"))) {
-            URI(url).resolve("index.html").toString()
-        } else null
+            it.text().replace(Regex("\\s+"), "").trim() in
+                setOf("目录", "返回目录", "章节目录", "章节列表", "全部章节", "返回列表")
+        }?.absUrl("href")
+            ?: if (pageUri?.host == "www.hetushu.com" &&
+                pageUri.path.matches(Regex("/book/[0-9]+/[0-9]+\\.html"))
+            ) {
+                pageUri.resolve("index.html").toString()
+            } else if (pageUri?.host?.let(::isQuanbenHost) == true &&
+                pageUri.path.matches(Regex("/n/[^/]+/[0-9]+\\.html"))
+            ) {
+                pageUri.resolve("list.html").toString()
+            } else null
         val text = NovelHtmlExtractor.extract(document)
         require(text.length >= 80) { "未找到足够正文，请在内置浏览器等待章节加载完毕后提取" }
         val documentTitle = document.title().trim()
@@ -100,4 +109,7 @@ object WebPageParser {
     private const val DEFAULT_USER_AGENT =
         "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+
+    private fun isQuanbenHost(host: String): Boolean =
+        host.equals("quanben.io", ignoreCase = true) || host.endsWith(".quanben.io", ignoreCase = true)
 }
