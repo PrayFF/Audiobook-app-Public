@@ -140,6 +140,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         launchBusy("书籍已导入") { repository.importFile(uri) }
     }
 
+    fun exportLibrary(uri: Uri) = launchBusy("书库备份已导出") {
+        repository.exportLibrary(uri)
+    }
+
+    fun restoreLibrary(uri: Uri) {
+        runCatching {
+            getApplication<Application>().contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+        }
+        launchBusy("书库备份已恢复") { repository.restoreLibrary(uri) }
+    }
+
     fun showMessage(value: String) { _message.value = value }
 
     fun importBrowserHtml(html: String, url: String, onDone: () -> Unit) = launchBusy("已加入书架，正在缓存正文") {

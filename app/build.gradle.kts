@@ -24,8 +24,8 @@ android {
         applicationId = "com.pray.booklisten"
         minSdk = 26
         targetSdk = 37
-        versionCode = 26
-        versionName = "1.0.0-alpha26"
+        versionCode = 27
+        versionName = "1.0.0-alpha27"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }

@@ -34,6 +34,10 @@ class BookRepository(
     suspend fun importCatalog(title: String, url: String): String =
         importCatalog(title, url, fetchWebCatalog(url))
 
+    suspend fun exportLibrary(uri: Uri) = LibraryBackup.export(context, database, uri)
+
+    suspend fun restoreLibrary(uri: Uri) = LibraryBackup.restore(context, database, uri)
+
     fun observeBooks(): Flow<List<BookEntity>> = dao.observeBooks()
     fun observeChapters(bookId: String): Flow<List<ChapterEntity>> = dao.observeChapters(bookId)
     suspend fun getBook(id: String) = dao.getBook(id)

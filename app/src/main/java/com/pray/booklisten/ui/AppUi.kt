@@ -93,6 +93,7 @@ private enum class Screen { LIBRARY, BROWSER, PLAYER }
 fun BookListenApp(viewModel: MainViewModel, initialUrl: String?) {
     var screen by rememberSaveable { mutableStateOf(if (initialUrl != null) Screen.BROWSER else Screen.LIBRARY) }
     var browserUrl by rememberSaveable { mutableStateOf(initialUrl.orEmpty()) }
+    var browserSession by rememberSaveable { mutableStateOf(0) }
     val message by viewModel.message.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val snackbar = remember { SnackbarHostState() }
@@ -136,11 +137,13 @@ fun BookListenApp(viewModel: MainViewModel, initialUrl: String?) {
                     },
                     onBrowse = {
                         browserUrl = ""
+                        browserSession++
                         screen = Screen.BROWSER
                     },
                 )
                 Screen.BROWSER -> BrowserScreen(
                     initialUrl = browserUrl,
+                    sessionKey = browserSession,
                     viewModel = viewModel,
                     onImported = { screen = Screen.LIBRARY },
                 )
@@ -176,9 +179,16 @@ private fun LibraryScreen(
     var deleteCollectionTarget by remember { mutableStateOf<CollectionEntity?>(null) }
     var draggingBookId by remember { mutableStateOf<String?>(null) }
     var dragInsertIndex by remember { mutableStateOf<Int?>(null) }
+    var backupMenu by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::importFile)
+    }
+    val exportBackupLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri -> uri?.let(viewModel::exportLibrary) }
+    val restoreBackupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(viewModel::restoreLibrary)
     }
     val visibleBooks = if (selectedCollection == null) {
         books
@@ -229,6 +239,7 @@ private fun LibraryScreen(
                     )
                     if (books.isEmpty()) {
                         Text("导入 TXT / EPUB，或从网页提取正文。所有数据只保存在本机。")
+                        Text("卸载 App 会清除书库；恢复书库需要事先导出的备份文件。", style = MaterialTheme.typography.bodySmall)
                         Button(onClick = { launcher.launch(arrayOf("*/*")) }) {
                             Text("导入本地书籍")
                         }
@@ -322,6 +333,25 @@ private fun LibraryScreen(
                 FloatingActionButton(onClick = onBrowse) { Text("搜") }
                 FloatingActionButton(onClick = { launcher.launch(arrayOf("*/*")) }) {
                     Text("导入")
+                }
+                Box {
+                    FloatingActionButton(onClick = { backupMenu = true }) { Text("备份") }
+                    DropdownMenu(expanded = backupMenu, onDismissRequest = { backupMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("导出书库备份") },
+                            onClick = {
+                                backupMenu = false
+                                exportBackupLauncher.launch("booklisten-library-backup.json")
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("恢复书库备份") },
+                            onClick = {
+                                backupMenu = false
+                                restoreBackupLauncher.launch(arrayOf("application/json", "text/plain", "*/*"))
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -665,16 +695,17 @@ private fun GridBookCard(
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImported: () -> Unit) {
-    var input by rememberSaveable { mutableStateOf(initialUrl) }
-    var requestedUrl by rememberSaveable { mutableStateOf("") }
-    var currentUrl by rememberSaveable { mutableStateOf("") }
+private fun BrowserScreen(initialUrl: String, sessionKey: Int, viewModel: MainViewModel, onImported: () -> Unit) {
+    var input by rememberSaveable(sessionKey) { mutableStateOf(initialUrl) }
+    var requestedUrl by rememberSaveable(sessionKey) { mutableStateOf("") }
+    var currentUrl by rememberSaveable(sessionKey) { mutableStateOf("") }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var extracting by remember { mutableStateOf(false) }
     var pageLoading by remember { mutableStateOf(false) }
     var retryCount by remember { mutableStateOf(0) }
     var navigationId by remember { mutableStateOf(0) }
     val context = LocalContext.current
+    val readerSettings by viewModel.settings.collectAsState()
 
     fun normalizedInput(): String? {
         val raw = input.trim().trimEnd('，', '。', '；', '、', '）', '》')
@@ -685,7 +716,8 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
         val target = when {
             raw.startsWith("https://", ignoreCase = true) -> raw
             raw.startsWith("http://", ignoreCase = true) -> "https://" + raw.substringAfter("://")
-            else -> "https://$raw"
+            raw.contains('.') && raw.none(Char::isWhitespace) -> "https://$raw"
+            else -> readerSettings.searchEngine + Uri.encode(raw)
         }
         if (Uri.parse(target).host.isNullOrBlank()) {
             viewModel.showMessage("网址格式不正确，请输入完整网址，例如 https://example.com/book")
@@ -703,42 +735,22 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
         webView?.loadUrl(target)
     }
 
-    if (requestedUrl.isBlank()) {
+    Column(Modifier.fillMaxSize()) {
         Column(
-            Modifier.fillMaxSize().padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("输入书籍网页网址", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Text("请先在浏览器中找到书籍正文页，再把网址复制到这里。应用不会自动登录或绕过付费页面。")
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                label = { Text("网页网址") },
-                placeholder = { Text("https://example.com/book/chapter-1") },
+                label = { Text("书名或网页网址") },
+                placeholder = { Text("输入书名，或粘贴 https://…") },
             )
-            Button(onClick = ::openInput, modifier = Modifier.fillMaxWidth()) { Text("打开这个网址") }
-            Text(
-                "如果网址以 http:// 开头，应用会优先尝试对应的 https:// 地址。",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-    } else {
-        Column(Modifier.fillMaxSize()) {
-            Column(
-                Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(10.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("网址（可修改后重新打开）") },
-                )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = ::openInput, modifier = Modifier.weight(1f)) { Text("打开网址") }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = ::openInput, modifier = Modifier.weight(1f)) { Text("搜索 / 打开") }
+                if (requestedUrl.isNotBlank()) {
                     OutlinedButton(onClick = {
                         navigationId++
                         webView?.stopLoading()
@@ -746,8 +758,13 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
                         webView = null
                         requestedUrl = ""
                         currentUrl = ""
-                    }) { Text("重新输入") }
+                    }) { Text("清空") }
                 }
+            }
+            if (requestedUrl.isBlank()) {
+                Text("可直接输入书名搜索，也可以粘贴书籍目录页或章节页网址。", style = MaterialTheme.typography.bodySmall)
+                Text("应用不会自动登录或绕过验证码、付费页面。", style = MaterialTheme.typography.bodySmall)
+            } else {
                 Button(
                     enabled = currentUrl.startsWith("https://") && !extracting && !pageLoading,
                     onClick = {
@@ -779,6 +796,8 @@ private fun BrowserScreen(initialUrl: String, viewModel: MainViewModel, onImport
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+        }
+        if (requestedUrl.isNotBlank()) {
             AndroidView(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 factory = {

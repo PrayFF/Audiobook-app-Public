@@ -16,6 +16,9 @@ interface BookDao {
     @Query("SELECT * FROM books ORDER BY sortOrder ASC, updatedAt DESC")
     suspend fun getBooksOnce(): List<BookEntity>
 
+    @Query("SELECT * FROM collections ORDER BY position ASC, createdAt ASC")
+    suspend fun getCollectionsOnce(): List<CollectionEntity>
+
     @Query("SELECT * FROM books WHERE id = :id")
     suspend fun getBook(id: String): BookEntity?
 
@@ -30,6 +33,9 @@ interface BookDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertBook(book: BookEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertBooks(books: List<BookEntity>)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertChapters(chapters: List<ChapterEntity>)
